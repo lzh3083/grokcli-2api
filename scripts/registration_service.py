@@ -866,10 +866,12 @@ async def extract_novproxy(request: Request) -> dict[str, Any]:
     expect_country = str(body.get("expect_country") or region or "US").strip().upper()
 
     from grok2api.upstream.browser_register import novproxy
+    import asyncio
 
     out_path = "/app/data/novproxy_nodes.txt"
     try:
-        good = novproxy.generate(
+        good = await asyncio.to_thread(
+            novproxy.generate,
             api_base=api_base,
             out_path=out_path,
             region=region,
@@ -877,8 +879,9 @@ async def extract_novproxy(request: Request) -> dict[str, Any]:
             minutes=minutes,
             expect_country=expect_country,
             workers=min(10, max(2, num)),
-            attempts=3,
-            rounds=2,
+            attempts=2,
+            rounds=1,
+            timeout=10.0,
             log=lambda m: print(f"[novproxy] {m}"),
         )
         lines = []
@@ -913,6 +916,7 @@ async def probe_proxy_pool(request: Request) -> dict[str, Any]:
 
     from grok2api.upstream.browser_register import novproxy
     import concurrent.futures
+    import asyncio
 
     def _test_one(proxy_raw: str) -> dict[str, Any]:
         p = proxy_raw.strip()
@@ -927,8 +931,10 @@ async def probe_proxy_pool(request: Request) -> dict[str, Any]:
 
     results = []
     if proxies:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(proxies))) as pool:
-            results = list(pool.map(_test_one, proxies))
+        def _run_probe() -> list[dict[str, Any]]:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(proxies))) as pool:
+                return list(pool.map(_test_one, proxies))
+        results = await asyncio.to_thread(_run_probe)
 
     return {"ok": True, "count": len(results), "nodes": results}
 

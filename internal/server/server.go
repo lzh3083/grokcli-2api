@@ -4497,12 +4497,14 @@ func serveAdminAccounts(w http.ResponseWriter, r *http.Request, options Options)
 // Shared registration HTTP client: admin UI polls batch/session every ~150–400ms.
 // Reusing one Transport avoids dial/TLS thrash and cuts log-refresh latency under load.
 var (
-	regHTTPClientOnce sync.Once
-	regHTTPClient     *http.Client
-	regClientMu       sync.Mutex
-	regClientCache    *regclient.Client
-	regClientBase     string
-	regClientToken    string
+	regHTTPClientOnce     sync.Once
+	regHTTPClient         *http.Client
+	regHTTPLongClientOnce sync.Once
+	regHTTPLongClient     *http.Client
+	regClientMu           sync.Mutex
+	regClientCache        *regclient.Client
+	regClientBase         string
+	regClientToken        string
 )
 
 func sharedRegistrationHTTP() *http.Client {
@@ -4522,6 +4524,25 @@ func sharedRegistrationHTTP() *http.Client {
 		}
 	})
 	return regHTTPClient
+}
+
+func sharedRegistrationHTTPLong() *http.Client {
+	regHTTPLongClientOnce.Do(func() {
+		// Long-timeout client for operations involving network probes, proxy extraction, turnstile solving, or browser actions.
+		regHTTPLongClient = &http.Client{
+			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+				MaxIdleConns:          64,
+				MaxIdleConnsPerHost:   16,
+				MaxConnsPerHost:       32,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 50 * time.Second,
+				ForceAttemptHTTP2:     true,
+			},
+		}
+	})
+	return regHTTPLongClient
 }
 
 func registrationClient(options Options) *regclient.Client {
@@ -4544,9 +4565,10 @@ func registrationClient(options Options) *regclient.Client {
 	regClientBase = base
 	regClientToken = token
 	regClientCache = &regclient.Client{
-		BaseURL: base,
-		Token:   token,
-		HTTP:    sharedRegistrationHTTP(),
+		BaseURL:  base,
+		Token:    token,
+		HTTP:     sharedRegistrationHTTP(),
+		HTTPLong: sharedRegistrationHTTPLong(),
 	}
 	return regClientCache
 }
