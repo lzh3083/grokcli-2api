@@ -23,6 +23,7 @@ from grok2api.upstream.browser_register import (
     captcha_solver,
     mail_service,
     registration_browser,
+    sso_risk,
     us_consistency,
 )
 from curl_cffi import requests
@@ -140,6 +141,7 @@ def run_browser_registration(
     browser_runtime.configure_runtime(cfg)
     mail_service.bind_runtime(cfg)
     captcha_solver.bind_runtime(cfg)
+    sso_risk.configure_risk_runtime(cfg, browser_runtime.http_get)
 
     # 5. Define status update callbacks
     def _log_cb(msg: str) -> None:
@@ -231,6 +233,29 @@ def run_browser_registration(
         if not sso:
             raise RuntimeError("未能从浏览器会话中提取到 sso cookie")
         _log_cb(f"[+] 成功获取 SSO Cookie (长度={len(sso)})")
+
+        # C. SSO 风控早停检查 (读取 grok.com botFlagSource / policy=deny)
+        if cfg.get("sso_risk_gate_enabled", True):
+            _log_cb("[*] 正在执行 SSO 风控早停安全检查 (botFlagSource / policy)...")
+            sso_risk.ensure_sso_eligible(
+                raw_token=sso,
+                email=email,
+                proxy=active_proxy,
+                log_callback=_log_cb,
+                http_get=browser_runtime.http_get,
+            )
+
+        # D. 开启 NSFW 敏感内容权限 (后处理开关)
+        if cfg.get("enable_nsfw", True):
+            _log_cb("[*] 正在开启账号 NSFW 权限 (gRPC-web)...")
+            try:
+                nsfw_ok, nsfw_msg = registration_browser.enable_nsfw_for_token(sso, log_callback=_log_cb)
+                if nsfw_ok:
+                    _log_cb(f"[+] NSFW 权限开启成功: {nsfw_msg}")
+                else:
+                    _log_cb(f"[!] NSFW 权限开启失败 (不影响账号正常入库): {nsfw_msg}")
+            except Exception as nsfw_exc:
+                _log_cb(f"[!] NSFW 开启异常: {nsfw_exc}")
 
     finally:
         # Always reclaim browser process and memory after each registration

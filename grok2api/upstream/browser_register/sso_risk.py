@@ -232,6 +232,8 @@ def resolve_rejected_file():
     configured = str((config or {}).get("sso_risk_rejected_file", "") or "").strip()
     if configured:
         return os.path.abspath(os.path.expanduser(configured))
+    if os.path.isdir("/app/data"):
+        return "/app/data/sso_risk_rejected.txt"
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "sso_risk_rejected.txt")
 
 
