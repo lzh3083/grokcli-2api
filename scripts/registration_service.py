@@ -854,48 +854,70 @@ async def extract_novproxy(request: Request) -> dict[str, Any]:
     extracted_time = qs.get("time", [None])[0]
     extracted_num = qs.get("num", [None])[0]
 
-    region = str(body.get("novproxy_region") or extracted_region or "US").strip()
+    # 若粘贴的完整 URL 中自带参数，以 URL 参数为准；否则取表单字段
+    region = str(extracted_region or body.get("novproxy_region") or "US").strip()
     try:
-        minutes = int(body.get("novproxy_minutes") or extracted_time or 60)
+        minutes = int(extracted_time or body.get("novproxy_minutes") or 60)
     except Exception:
         minutes = 60
     try:
-        num = int(body.get("novproxy_num") or extracted_num or 1)
+        num = int(extracted_num or body.get("novproxy_num") or 1)
     except Exception:
         num = 1
-    expect_country = str(body.get("expect_country") or region or "US").strip().upper()
+    expect_country = str(body.get("expect_country") or region or "").strip().upper()
+    if expect_country in ("RAND", "ALL", "GLOBAL", "ANY", "*"):
+        expect_country = ""
 
     from grok2api.upstream.browser_register import novproxy
     import asyncio
+    import concurrent.futures
 
     out_path = "/app/data/novproxy_nodes.txt"
     try:
-        good = await asyncio.to_thread(
-            novproxy.generate,
-            api_base=api_base,
-            out_path=out_path,
-            region=region,
-            want=num,
-            minutes=minutes,
-            expect_country=expect_country,
-            workers=min(10, max(2, num)),
-            attempts=2,
-            rounds=1,
-            timeout=10.0,
-            log=lambda m: print(f"[novproxy] {m}"),
-        )
+        def _do_extract() -> list[dict[str, Any]]:
+            # 单次快速提取，供应商报错时 1 秒内抛出明确原因（如白名单、余额）
+            nodes = novproxy.fetch_nodes(
+                api_base=api_base,
+                region=region,
+                num=num,
+                minutes=minutes,
+                attempts=1,
+                timeout=12.0,
+                log=lambda m: print(f"[novproxy] {m}"),
+            )
+            if not nodes:
+                raise novproxy.NovProxyError("NovProxy 接口未返回任何可用节点")
+
+            # 并发快速测活探测真实出口（每个节点超时 5 秒，不进行 18s 无谓死等）
+            def _probe(n: str) -> dict[str, Any]:
+                res = novproxy.probe_node(n, expect_country=expect_country, timeout=6.0)
+                # 若网络连通但仅国家代码不同，视作软性提示，不强制判死节点
+                if not res.get("ok") and res.get("exit_ip") and "国家不符" in res.get("reason", ""):
+                    res["ok"] = True
+                    res["note"] = res.get("reason")
+                return res
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(nodes))) as pool:
+                probed = list(pool.map(_probe, nodes))
+
+            # 写出可用节点到磁盘
+            valid_nodes = [p.get("node") for p in probed if p.get("ok")] or nodes
+            novproxy.write_nodes(out_path, valid_nodes)
+            return probed
+
+        probed_nodes = await asyncio.to_thread(_do_extract)
         lines = []
-        for n in good:
+        for n in probed_nodes:
             node_str = n.get("node") if isinstance(n, dict) else str(n)
             if not node_str.startswith("socks5h://") and not node_str.startswith("http://"):
                 node_str = "socks5h://" + node_str
             lines.append(node_str)
         return {
             "ok": True,
-            "count": len(good),
-            "nodes": good,
+            "count": len(probed_nodes),
+            "nodes": probed_nodes,
             "lines": lines,
-            "message": f"成功提取并验证 {len(good)} 个住宅代理节点",
+            "message": f"成功提取并验证 {len(probed_nodes)} 个住宅代理节点",
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"NovProxy 提取失败: {exc}") from exc
