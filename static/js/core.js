@@ -6065,9 +6065,15 @@ function bindRegMailFormControls() {
     console.warn("bindRegMailFormControls paint", e);
   }
   try {
+    syncNovProxyModeUI();
+    if ($("btn-novproxy-generate")) $("btn-novproxy-generate").onclick = () => { generateNovProxyUserPassNodes(); };
     if ($("btn-novproxy-extract")) $("btn-novproxy-extract").onclick = () => { extractNovProxyNodes().catch(() => {}); };
     if ($("btn-probe-proxy-nodes")) $("btn-probe-proxy-nodes").onclick = () => { probeProxyPoolNodes().catch(() => {}); };
     if ($("btn-clear-proxy-nodes")) $("btn-clear-proxy-nodes").onclick = () => { clearProxyPoolNodes(); };
+    if ($("reg-novproxy-api") && !$("reg-novproxy-api")._boundApiInput) {
+      $("reg-novproxy-api")._boundApiInput = true;
+      $("reg-novproxy-api").addEventListener("input", () => { onNovProxyApiUrlInput(); });
+    }
     if ($("reg-proxy") && !$("reg-proxy")._boundProxyTable) {
       $("reg-proxy")._boundProxyTable = true;
       $("reg-proxy").addEventListener("input", () => { renderProxyNodesTable(); });
@@ -6086,7 +6092,12 @@ if (!window.__g2aRegMailDelegated) {
     "change",
     (e) => {
       const t = e && e.target;
-      if (!t || !t.id) return;
+      if (!t) return;
+      if (t.name === "reg-novproxy-mode") {
+        try { syncNovProxyModeUI(); } catch (_) {}
+        return;
+      }
+      if (!t.id) return;
       if (t.id === "reg-mail-provider") {
         try {
           syncRegMailProviderUI({ toast: true });
@@ -6161,6 +6172,14 @@ function readRegConfig() {
     proxy_username: $("reg-proxy-username") ? $("reg-proxy-username").value.trim() : "",
     proxy_password: $("reg-proxy-password") ? $("reg-proxy-password").value.trim() : "",
     proxy_strategy: $("reg-proxy-strategy") ? $("reg-proxy-strategy").value.trim() : "round_robin",
+    novproxy_mode: $("reg-novproxy-mode-api") && $("reg-novproxy-mode-api").checked ? "api" : "userpass",
+    novproxy_up_host: $("reg-novproxy-up-host") ? $("reg-novproxy-up-host").value.trim() : "us.novproxy.io:1000",
+    novproxy_up_proto: $("reg-novproxy-up-proto") ? $("reg-novproxy-up-proto").value.trim() : "socks5h",
+    novproxy_up_user: $("reg-novproxy-up-user") ? $("reg-novproxy-up-user").value.trim() : "",
+    novproxy_up_pass: $("reg-novproxy-up-pass") ? $("reg-novproxy-up-pass").value.trim() : "",
+    novproxy_up_region: $("reg-novproxy-up-region") ? $("reg-novproxy-up-region").value.trim() : "US",
+    novproxy_up_time: $("reg-novproxy-up-time") ? $("reg-novproxy-up-time").value.trim() : "60",
+    novproxy_up_num: $("reg-novproxy-up-num") ? $("reg-novproxy-up-num").value.trim() : "1",
     novproxy_api: $("reg-novproxy-api") ? $("reg-novproxy-api").value.trim() : "https://white.novproxy.com/white/api",
     novproxy_region: $("reg-novproxy-region") ? $("reg-novproxy-region").value.trim() : "US",
     novproxy_minutes: $("reg-novproxy-minutes") ? $("reg-novproxy-minutes").value.trim() : "60",
@@ -6373,18 +6392,23 @@ function applyRegConfig(cfg) {
   if ($("reg-sso-risk-rejected-file")) {
     $("reg-sso-risk-rejected-file").value = cfg.sso_risk_rejected_file || "./sso_risk_rejected.txt";
   }
-  if ($("reg-novproxy-api")) {
-    $("reg-novproxy-api").value = cfg.novproxy_api || "https://white.novproxy.com/white/api";
+  if ($("reg-novproxy-mode-api") && $("reg-novproxy-mode-userpass")) {
+    const isApi = (cfg.novproxy_mode || "").toLowerCase() === "api";
+    $("reg-novproxy-mode-api").checked = isApi;
+    $("reg-novproxy-mode-userpass").checked = !isApi;
   }
-  if ($("reg-novproxy-region")) {
-    $("reg-novproxy-region").value = cfg.novproxy_region || "US";
-  }
-  if ($("reg-novproxy-minutes")) {
-    $("reg-novproxy-minutes").value = cfg.novproxy_minutes != null ? String(cfg.novproxy_minutes) : "60";
-  }
-  if ($("reg-novproxy-num")) {
-    $("reg-novproxy-num").value = cfg.novproxy_num != null ? String(cfg.novproxy_num) : "1";
-  }
+  if ($("reg-novproxy-up-host")) $("reg-novproxy-up-host").value = cfg.novproxy_up_host || "us.novproxy.io:1000";
+  if ($("reg-novproxy-up-proto")) $("reg-novproxy-up-proto").value = cfg.novproxy_up_proto || "socks5h";
+  if ($("reg-novproxy-up-user")) $("reg-novproxy-up-user").value = cfg.novproxy_up_user || "";
+  if ($("reg-novproxy-up-pass")) $("reg-novproxy-up-pass").value = cfg.novproxy_up_pass || "";
+  if ($("reg-novproxy-up-region")) $("reg-novproxy-up-region").value = cfg.novproxy_up_region || "US";
+  if ($("reg-novproxy-up-time")) $("reg-novproxy-up-time").value = cfg.novproxy_up_time != null ? String(cfg.novproxy_up_time) : "60";
+  if ($("reg-novproxy-up-num")) $("reg-novproxy-up-num").value = cfg.novproxy_up_num != null ? String(cfg.novproxy_up_num) : "1";
+  if ($("reg-novproxy-api")) $("reg-novproxy-api").value = cfg.novproxy_api || "https://white.novproxy.com/white/api";
+  if ($("reg-novproxy-region")) $("reg-novproxy-region").value = cfg.novproxy_region || "US";
+  if ($("reg-novproxy-minutes")) $("reg-novproxy-minutes").value = cfg.novproxy_minutes != null ? String(cfg.novproxy_minutes) : "60";
+  if ($("reg-novproxy-num")) $("reg-novproxy-num").value = cfg.novproxy_num != null ? String(cfg.novproxy_num) : "1";
+  syncNovProxyModeUI();
   renderProxyNodesTable();
   syncRegCaptchaProviderUI();
   syncRegMailProviderUI();
@@ -6483,6 +6507,70 @@ function renderProxyNodesTable(nodesData) {
   }
 }
 
+function syncNovProxyModeUI() {
+  const isUserPass = $("reg-novproxy-mode-userpass") ? $("reg-novproxy-mode-userpass").checked : true;
+  document.querySelectorAll(".novproxy-up-panel").forEach((el) => {
+    el.style.display = isUserPass ? "" : "none";
+  });
+  document.querySelectorAll(".novproxy-api-panel").forEach((el) => {
+    el.style.display = isUserPass ? "none" : "";
+  });
+}
+
+function generateNovProxyUserPassNodes() {
+  const host = $("reg-novproxy-up-host") ? $("reg-novproxy-up-host").value.trim() : "us.novproxy.io:1000";
+  const proto = $("reg-novproxy-up-proto") ? $("reg-novproxy-up-proto").value.trim() : "socks5h";
+  let user = $("reg-novproxy-up-user") ? $("reg-novproxy-up-user").value.trim() : "";
+  const pass = $("reg-novproxy-up-pass") ? $("reg-novproxy-up-pass").value.trim() : "";
+  const region = $("reg-novproxy-up-region") ? $("reg-novproxy-up-region").value.trim() : "US";
+  const time = $("reg-novproxy-up-time") ? $("reg-novproxy-up-time").value.trim() : "60";
+  const num = Math.max(1, Math.min(500, parseInt($("reg-novproxy-up-num") ? $("reg-novproxy-up-num").value.trim() : "1", 10) || 1));
+
+  if (!user) {
+    toast("请输入 NovProxy 用户名", false);
+    if ($("reg-novproxy-up-user")) $("reg-novproxy-up-user").focus();
+    return;
+  }
+  if (!pass) {
+    toast("请输入 NovProxy 密码", false);
+    if ($("reg-novproxy-up-pass")) $("reg-novproxy-up-pass").focus();
+    return;
+  }
+
+  // 若用户填入了带 -region- 的长格式，自动提取基础用户名
+  if (user.includes("-region-")) {
+    user = user.split("-region-")[0].trim();
+  }
+
+  const lines = [];
+  for (let i = 0; i < num; i++) {
+    const sid = Math.random().toString(36).substring(2, 10);
+    const formattedUser = `${user}-region-${region || "US"}-sid-${sid}-t-${time || "60"}`;
+    const proxyLine = `${proto}://${formattedUser}:${pass}@${host}`;
+    lines.push(proxyLine);
+  }
+
+  if ($("reg-proxy")) {
+    $("reg-proxy").value = lines.join("\n");
+  }
+  renderProxyNodesTable(lines);
+  toast(`已生成 ${lines.length} 个 NovProxy 住宅账密节点（一号一IP）`, true);
+}
+
+function onNovProxyApiUrlInput() {
+  const val = $("reg-novproxy-api") ? $("reg-novproxy-api").value.trim() : "";
+  if (!val || !val.includes("?")) return;
+  try {
+    const url = new URL(val);
+    const reg = url.searchParams.get("region");
+    const t = url.searchParams.get("time");
+    const n = url.searchParams.get("num");
+    if (reg && $("reg-novproxy-region")) $("reg-novproxy-region").value = reg;
+    if (t && $("reg-novproxy-minutes")) $("reg-novproxy-minutes").value = t;
+    if (n && $("reg-novproxy-num")) $("reg-novproxy-num").value = n;
+  } catch (_) {}
+}
+
 async function extractNovProxyNodes() {
   const btn = $("btn-novproxy-extract");
   if (!btn) return;
@@ -6490,6 +6578,7 @@ async function extractNovProxyNodes() {
   try {
     btn.disabled = true;
     btn.textContent = "提取并预热中...";
+    onNovProxyApiUrlInput();
     const req = {
       novproxy_api: $("reg-novproxy-api") ? $("reg-novproxy-api").value.trim() : "",
       novproxy_region: $("reg-novproxy-region") ? $("reg-novproxy-region").value.trim() : "US",
@@ -10638,6 +10727,9 @@ if ($("btn-close-reg-inline") && !$("btn-close-reg-inline").onclick) {
     dismissRegProgressCard();
     toast("已关闭进度卡片（后台注册不受影响）");
   });
+}
+if ($("btn-novproxy-generate") && !$("btn-novproxy-generate").onclick) {
+  on("btn-novproxy-generate", "onclick", () => { generateNovProxyUserPassNodes(); });
 }
 if ($("btn-novproxy-extract") && !$("btn-novproxy-extract").onclick) {
   on("btn-novproxy-extract", "onclick", () => { extractNovProxyNodes().catch(() => {}); });

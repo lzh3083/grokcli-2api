@@ -844,10 +844,25 @@ async def extract_novproxy(request: Request) -> dict[str, Any]:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    api_base = str(body.get("novproxy_api") or "https://white.novproxy.com/white/api").strip()
-    region = str(body.get("novproxy_region") or "US").strip()
-    minutes = int(body.get("novproxy_minutes") or 120)
-    num = int(body.get("novproxy_num") or 1)
+    raw_api = str(body.get("novproxy_api") or "https://white.novproxy.com/white/api").strip()
+    from urllib.parse import urlsplit, parse_qs
+    parsed = urlsplit(raw_api)
+    qs = parse_qs(parsed.query)
+    api_base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.scheme and parsed.netloc else raw_api
+
+    extracted_region = qs.get("region", [None])[0]
+    extracted_time = qs.get("time", [None])[0]
+    extracted_num = qs.get("num", [None])[0]
+
+    region = str(body.get("novproxy_region") or extracted_region or "US").strip()
+    try:
+        minutes = int(body.get("novproxy_minutes") or extracted_time or 60)
+    except Exception:
+        minutes = 60
+    try:
+        num = int(body.get("novproxy_num") or extracted_num or 1)
+    except Exception:
+        num = 1
     expect_country = str(body.get("expect_country") or region or "US").strip().upper()
 
     from grok2api.upstream.browser_register import novproxy
