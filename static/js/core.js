@@ -6065,6 +6065,9 @@ function bindRegMailFormControls() {
     console.warn("bindRegMailFormControls paint", e);
   }
   try {
+    if ($("reg-novproxy-mode")) {
+      $("reg-novproxy-mode").onchange = () => { syncNovProxyModeUI(); };
+    }
     syncNovProxyModeUI();
     if ($("btn-novproxy-generate")) $("btn-novproxy-generate").onclick = () => { generateNovProxyUserPassNodes(); };
     if ($("btn-novproxy-extract")) $("btn-novproxy-extract").onclick = () => { extractNovProxyNodes().catch(() => {}); };
@@ -6093,7 +6096,7 @@ if (!window.__g2aRegMailDelegated) {
     (e) => {
       const t = e && e.target;
       if (!t) return;
-      if (t.name === "reg-novproxy-mode") {
+      if (t.id === "reg-novproxy-mode" || t.name === "reg-novproxy-mode") {
         try { syncNovProxyModeUI(); } catch (_) {}
         return;
       }
@@ -6172,7 +6175,7 @@ function readRegConfig() {
     proxy_username: $("reg-proxy-username") ? $("reg-proxy-username").value.trim() : "",
     proxy_password: $("reg-proxy-password") ? $("reg-proxy-password").value.trim() : "",
     proxy_strategy: $("reg-proxy-strategy") ? $("reg-proxy-strategy").value.trim() : "round_robin",
-    novproxy_mode: $("reg-novproxy-mode-api") && $("reg-novproxy-mode-api").checked ? "api" : "userpass",
+    novproxy_mode: $("reg-novproxy-mode") ? $("reg-novproxy-mode").value.trim() : "userpass",
     novproxy_up_host: $("reg-novproxy-up-host") ? $("reg-novproxy-up-host").value.trim() : "us.novproxy.io:1000",
     novproxy_up_proto: $("reg-novproxy-up-proto") ? $("reg-novproxy-up-proto").value.trim() : "socks5h",
     novproxy_up_user: $("reg-novproxy-up-user") ? $("reg-novproxy-up-user").value.trim() : "",
@@ -6392,10 +6395,8 @@ function applyRegConfig(cfg) {
   if ($("reg-sso-risk-rejected-file")) {
     $("reg-sso-risk-rejected-file").value = cfg.sso_risk_rejected_file || "./sso_risk_rejected.txt";
   }
-  if ($("reg-novproxy-mode-api") && $("reg-novproxy-mode-userpass")) {
-    const isApi = (cfg.novproxy_mode || "").toLowerCase() === "api";
-    $("reg-novproxy-mode-api").checked = isApi;
-    $("reg-novproxy-mode-userpass").checked = !isApi;
+  if ($("reg-novproxy-mode")) {
+    $("reg-novproxy-mode").value = (cfg.novproxy_mode || "").toLowerCase() === "api" ? "api" : "userpass";
   }
   if ($("reg-novproxy-up-host")) $("reg-novproxy-up-host").value = cfg.novproxy_up_host || "us.novproxy.io:1000";
   if ($("reg-novproxy-up-proto")) $("reg-novproxy-up-proto").value = cfg.novproxy_up_proto || "socks5h";
@@ -6508,14 +6509,36 @@ function renderProxyNodesTable(nodesData) {
 }
 
 function syncNovProxyModeUI() {
-  const isUserPass = $("reg-novproxy-mode-userpass") ? $("reg-novproxy-mode-userpass").checked : true;
+  const sel = $("reg-novproxy-mode");
+  const mode = sel ? sel.value : "userpass";
+  const isUserPass = mode === "userpass";
+
   document.querySelectorAll(".novproxy-up-panel").forEach((el) => {
-    el.style.display = isUserPass ? "" : "none";
+    if (isUserPass) {
+      el.style.removeProperty("display");
+      el.removeAttribute("hidden");
+    } else {
+      el.style.setProperty("display", "none", "important");
+      el.setAttribute("hidden", "true");
+    }
   });
+
   document.querySelectorAll(".novproxy-api-panel").forEach((el) => {
-    el.style.display = isUserPass ? "none" : "";
+    if (!isUserPass) {
+      el.style.removeProperty("display");
+      el.removeAttribute("hidden");
+      if (el.id === "novproxy-panel-api-btn") {
+        el.style.display = "flex";
+      } else {
+        el.style.display = "block";
+      }
+    } else {
+      el.style.setProperty("display", "none", "important");
+      el.setAttribute("hidden", "true");
+    }
   });
 }
+window.syncNovProxyModeUI = syncNovProxyModeUI;
 
 function generateNovProxyUserPassNodes() {
   const host = $("reg-novproxy-up-host") ? $("reg-novproxy-up-host").value.trim() : "us.novproxy.io:1000";
@@ -10727,6 +10750,9 @@ if ($("btn-close-reg-inline") && !$("btn-close-reg-inline").onclick) {
     dismissRegProgressCard();
     toast("已关闭进度卡片（后台注册不受影响）");
   });
+}
+if ($("reg-novproxy-mode")) {
+  $("reg-novproxy-mode").onchange = () => { syncNovProxyModeUI(); };
 }
 if ($("btn-novproxy-generate") && !$("btn-novproxy-generate").onclick) {
   on("btn-novproxy-generate", "onclick", () => { generateNovProxyUserPassNodes(); });

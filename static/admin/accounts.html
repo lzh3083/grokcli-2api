@@ -501,19 +501,15 @@
       </select>
     </div>
     <div class="g2a-field g2a-field-span2" style="margin:12px 0 4px;padding-top:12px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
-      <div style="font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <span>NovProxy 住宅代理 (一号一IP)</span>
-        <div style="font-size:13px;font-weight:normal;display:flex;gap:16px">
-          <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
-            <input type="radio" name="reg-novproxy-mode" id="reg-novproxy-mode-userpass" value="userpass" checked />
-            <span>账密模式 (动态流量)</span>
-          </label>
-          <label style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
-            <input type="radio" name="reg-novproxy-mode" id="reg-novproxy-mode-api" value="api" />
-            <span>API提取模式 (白名单)</span>
-          </label>
-        </div>
-      </div>
+      <div style="font-weight:600;font-size:14px;margin-bottom:6px">NovProxy 住宅代理配置 (一号一IP)</div>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label for="reg-novproxy-mode">认证 / 提取模式</label>
+      <select id="reg-novproxy-mode" onchange="window.syncNovProxyModeUI ? window.syncNovProxyModeUI() : null">
+        <option value="userpass" selected>账密模式 (动态流量 · 推荐，免白名单，自动生成随机 session-id)</option>
+        <option value="api">API 提取模式 (白名单模式 · 从官方接口拉取)</option>
+      </select>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">支持自动生成独占住宅 IP 会话，或通过官方 API 白名单批量拉取。</div>
     </div>
 
     <!-- 账密模式面板 -->
