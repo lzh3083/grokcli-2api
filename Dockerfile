@@ -61,6 +61,7 @@ ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        chromium \
         curl \
         fonts-liberation \
         fonts-noto-color-emoji \

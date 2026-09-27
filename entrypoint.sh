@@ -51,6 +51,19 @@ solver_browser="${TURNSTILE_BROWSER_TYPE:-camoufox}"
 solver_host="${TURNSTILE_HOST:-127.0.0.1}"
 solver_pid=""
 reg_pid=""
+xvfb_pid=""
+
+start_xvfb() {
+  if command -v Xvfb >/dev/null 2>&1; then
+    export DISPLAY="${DISPLAY:-:99}"
+    if ! pgrep -x Xvfb >/dev/null 2>&1; then
+      echo "[entrypoint] starting Xvfb on display ${DISPLAY}"
+      Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
+      xvfb_pid=$!
+      sleep 1
+    fi
+  fi
+}
 
 # Python package roots used by registration/SSO/captcha sidecars.
 export PYTHONPATH="${PYTHONPATH:-/app:/app/grok-build-auth}"
@@ -204,8 +217,12 @@ run_migrations() {
 cleanup() {
   stop_pid "registration sidecar" "${reg_pid}"
   stop_pid "turnstile-solver" "${solver_pid}"
+  stop_pid "xvfb" "${xvfb_pid:-}"
 }
 trap cleanup EXIT INT TERM
+
+# Start virtual display for browser automation and solver
+start_xvfb
 
 # Schema first: sidecars and the Go app both expect applied migrations.
 if ! run_migrations; then

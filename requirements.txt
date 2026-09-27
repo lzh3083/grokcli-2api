@@ -8,3 +8,10 @@ python-multipart>=0.0.9
 # registration engine (dongguatanglinux/grok-build-auth HTTP protocol + MoeMail)
 requests>=2.31.0
 python-dotenv>=1.0.0
+# browser registration engine (grok-register)
+DrissionPage>=4.1.1.2,<4.2
+websocket-client==1.9.0
+filelock
+psutil
+tldextract
+lxml
