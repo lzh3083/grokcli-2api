@@ -273,6 +273,13 @@ async def start_job(
             "cloudmail_base_url",
             "api_key",
             "base_url",
+            "proxy_pool_preflight_enabled",
+            "us_consistency_enabled",
+            "us_consistency_timezone",
+            "us_consistency_locale",
+            "enable_nsfw",
+            "sso_risk_gate_enabled",
+            "sso_risk_rejected_file",
         )
         if k in body
     }

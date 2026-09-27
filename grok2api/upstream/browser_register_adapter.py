@@ -92,6 +92,19 @@ def run_browser_registration(
     # 1. Load active config
     cfg = app_config.load_config()
 
+    # Overlay user preferences from session/web form
+    for k in (
+        "proxy_pool_preflight_enabled",
+        "us_consistency_enabled",
+        "us_consistency_timezone",
+        "us_consistency_locale",
+        "enable_nsfw",
+        "sso_risk_gate_enabled",
+        "sso_risk_rejected_file",
+    ):
+        if k in sess and sess[k] is not None:
+            cfg[k] = sess[k]
+
     # Detect browser executable
     chrome_bin = _detect_chromium_path()
     if chrome_bin:

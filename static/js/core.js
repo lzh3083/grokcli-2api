@@ -6155,6 +6155,13 @@ function readRegConfig() {
     probe_delay_sec: $("reg-probe-delay-sec")
       ? $("reg-probe-delay-sec").value.trim()
       : "30",
+    proxy_pool_preflight_enabled: $("reg-preflight-enabled") ? $("reg-preflight-enabled").checked : true,
+    us_consistency_enabled: $("reg-us-consistency-enabled") ? $("reg-us-consistency-enabled").checked : true,
+    us_consistency_timezone: $("reg-consistency-timezone") ? $("reg-consistency-timezone").value.trim() : "",
+    us_consistency_locale: $("reg-consistency-locale") ? $("reg-consistency-locale").value.trim() : "",
+    enable_nsfw: $("reg-enable-nsfw") ? $("reg-enable-nsfw").checked : true,
+    sso_risk_gate_enabled: $("reg-sso-risk-enabled") ? $("reg-sso-risk-enabled").checked : true,
+    sso_risk_rejected_file: $("reg-sso-risk-rejected-file") ? $("reg-sso-risk-rejected-file").value.trim() : "./sso_risk_rejected.txt",
   };
 }
 // MoeMail official EXPIRY_OPTIONS only:
@@ -6328,6 +6335,27 @@ function applyRegConfig(cfg) {
     $("reg-probe-delay-sec").value = String(
       Number.isFinite(pd) ? Math.max(0, Math.min(600, Math.floor(pd))) : 30
     );
+  }
+  if ($("reg-preflight-enabled")) {
+    $("reg-preflight-enabled").checked = cfg.proxy_pool_preflight_enabled !== false;
+  }
+  if ($("reg-us-consistency-enabled")) {
+    $("reg-us-consistency-enabled").checked = cfg.us_consistency_enabled !== false;
+  }
+  if ($("reg-consistency-timezone")) {
+    $("reg-consistency-timezone").value = cfg.us_consistency_timezone || "";
+  }
+  if ($("reg-consistency-locale")) {
+    $("reg-consistency-locale").value = cfg.us_consistency_locale || "";
+  }
+  if ($("reg-enable-nsfw")) {
+    $("reg-enable-nsfw").checked = cfg.enable_nsfw !== false;
+  }
+  if ($("reg-sso-risk-enabled")) {
+    $("reg-sso-risk-enabled").checked = cfg.sso_risk_gate_enabled !== false;
+  }
+  if ($("reg-sso-risk-rejected-file")) {
+    $("reg-sso-risk-rejected-file").value = cfg.sso_risk_rejected_file || "./sso_risk_rejected.txt";
   }
   syncRegCaptchaProviderUI();
   syncRegMailProviderUI();
@@ -6650,6 +6678,13 @@ function buildRegBody(config) {
   if (Number.isFinite(probeDelay) && probeDelay >= 0) {
     body.probe_delay_sec = Math.min(600, Math.max(0, Math.floor(probeDelay)));
   }
+  body.proxy_pool_preflight_enabled = config.proxy_pool_preflight_enabled !== false;
+  body.us_consistency_enabled = config.us_consistency_enabled !== false;
+  body.us_consistency_timezone = config.us_consistency_timezone || "";
+  body.us_consistency_locale = config.us_consistency_locale || "";
+  body.enable_nsfw = config.enable_nsfw !== false;
+  body.sso_risk_gate_enabled = config.sso_risk_gate_enabled !== false;
+  body.sso_risk_rejected_file = config.sso_risk_rejected_file || "./sso_risk_rejected.txt";
   return body;
 }
 
