@@ -25,9 +25,25 @@ import os
 import time
 import urllib.request
 
-# 美国东部时区：人口最密集，是"美国用户"最自然的默认值。
+# 默认时区与语言（美国东部，亦作为无法识别时的通用默认）
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_LOCALE = "en-US"
+
+# 常见国家代码 -> 默认首选时区与语言/Accept-Language 映射
+_COUNTRY_PRESETS = {
+    "US": {"timezone": "America/New_York", "locale": "en-US", "accept_lang": "en-US,en;q=0.9"},
+    "JP": {"timezone": "Asia/Tokyo", "locale": "ja-JP", "accept_lang": "ja,en-US;q=0.9,en;q=0.8"},
+    "GB": {"timezone": "Europe/London", "locale": "en-GB", "accept_lang": "en-GB,en;q=0.9"},
+    "DE": {"timezone": "Europe/Berlin", "locale": "de-DE", "accept_lang": "de-DE,de;q=0.9,en-US;q=0.8"},
+    "FR": {"timezone": "Europe/Paris", "locale": "fr-FR", "accept_lang": "fr-FR,fr;q=0.9,en-US;q=0.8"},
+    "SG": {"timezone": "Asia/Singapore", "locale": "en-SG", "accept_lang": "en-SG,en;q=0.9,zh-CN;q=0.8"},
+    "HK": {"timezone": "Asia/Hong_Kong", "locale": "zh-HK", "accept_lang": "zh-HK,zh;q=0.9,en-US;q=0.8"},
+    "TW": {"timezone": "Asia/Taipei", "locale": "zh-TW", "accept_lang": "zh-TW,zh;q=0.9,en-US;q=0.8"},
+    "KR": {"timezone": "Asia/Seoul", "locale": "ko-KR", "accept_lang": "ko-KR,ko;q=0.9,en-US;q=0.8"},
+    "CA": {"timezone": "America/Toronto", "locale": "en-CA", "accept_lang": "en-CA,en;q=0.9"},
+    "AU": {"timezone": "Australia/Sydney", "locale": "en-AU", "accept_lang": "en-AU,en;q=0.9"},
+    "NL": {"timezone": "Europe/Amsterdam", "locale": "nl-NL", "accept_lang": "nl-NL,nl;q=0.9,en-US;q=0.8"},
+}
 
 # 与 UA 保持一致的 Windows 桌面参数。
 DEFAULT_PLATFORM = "Win32"
@@ -180,15 +196,10 @@ def apply_region_timezone(region) -> str:
 
 
 def probe_exit_region(proxy_url="", timeout=20):
-    """经代理探测出口的国家与地区，返回 dict（失败返回空 dict）。
-
-    用标准库实现：此时浏览器还没启动，拿到的通常是 proxy_bridge 提供的
-    无认证本地代理，urllib 可直接使用。探测失败不抛异常 —— 一致性对齐
-    属于增强项，不应因探测失败而中断注册主流程。
-    """
+    """经代理或直连探测出口的国家与地区，返回 dict（失败返回空 dict）。"""
     url = (
         "http://ip-api.com/json/?fields=status,country,countryCode,"
-        "regionName,city,isp,hosting,proxy,mobile,query"
+        "regionName,city,timezone,isp,hosting,proxy,mobile,query"
     )
     raw = str(proxy_url or "").strip()
     try:
@@ -208,25 +219,47 @@ def probe_exit_region(proxy_url="", timeout=20):
     return {
         "ip": str(data.get("query") or ""),
         "country": str(data.get("countryCode") or ""),
+        "country_name": str(data.get("country") or ""),
         "region": str(data.get("regionName") or ""),
         "city": str(data.get("city") or ""),
+        "timezone": str(data.get("timezone") or ""),
         "isp": str(data.get("isp") or ""),
         "hosting": bool(data.get("hosting")),
         "proxy": bool(data.get("proxy")),
     }
 
 
-def align_timezone_with_proxy(proxy_url="", expect_country="US") -> str:
-    """探测代理出口地区并把时区对齐到该地区，返回生效的时区名。
-
-    仅当出口国家符合预期时才对齐，避免误连到其他国家时代码「将错就错」。
-    """
+def align_timezone_with_proxy(proxy_url="", expect_country="") -> str:
+    """探测代理或直连真实出口地区，并将时区与语言自动对齐到该地区（支持全球多国自适应）。"""
     info = probe_exit_region(proxy_url)
     if not info:
         return ""
-    if expect_country and info.get("country") != expect_country:
+    country = str(info.get("country") or "").upper()
+    expect = str(expect_country or "").strip().upper()
+    if expect and expect not in ("AUTO", "ANY", "*") and country != expect:
         return ""
-    return apply_region_timezone(info.get("region"))
+
+    # 1. 优先使用 ip-api 接口返回的官方权威 timezone
+    zone = str(info.get("timezone") or "").strip()
+    # 2. 若无 timezone 且属于美国，使用州时区表补全
+    if not zone and country == "US":
+        zone = timezone_for_region(info.get("region"))
+    # 3. 兜底查询常见国家预设表
+    if not zone and country in _COUNTRY_PRESETS:
+        zone = _COUNTRY_PRESETS[country]["timezone"]
+
+    if zone:
+        _config["us_consistency_timezone"] = zone
+        # 自适应更新 locale 与 accept_language
+        if country in _COUNTRY_PRESETS:
+            preset = _COUNTRY_PRESETS[country]
+            _config["us_consistency_locale"] = preset["locale"]
+            globals()["DEFAULT_ACCEPT_LANGUAGE"] = preset["accept_lang"]
+        _config["_detected_country"] = country
+        _config["_detected_city"] = info.get("city")
+        apply_process_timezone()
+        return zone
+    return ""
 
 
 def enabled() -> bool:
@@ -365,8 +398,10 @@ def apply_page_overrides(page) -> bool:
 def describe() -> str:
     """返回人类可读的一致性摘要，用于启动日志。"""
     if not enabled():
-        return "美国环境一致性: 已关闭（原版行为）"
-    return "美国环境一致性: 已启用 (时区=%s, 语言=%s, 平台=%s)" % (
+        return "网络环境一致性: 已关闭（原版行为）"
+    country = _config.get("_detected_country") or "AUTO"
+    return "网络环境一致性: 已启用 (出口国家=%s, 时区=%s, 语言=%s, 平台=%s)" % (
+        country,
         timezone_name(),
         locale_name(),
         DEFAULT_PLATFORM,

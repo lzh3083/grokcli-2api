@@ -23,7 +23,35 @@ from grok2api.upstream.browser_register import (
     captcha_solver,
     mail_service,
     registration_browser,
+    us_consistency,
 )
+from curl_cffi import requests
+
+
+def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[str], None] = None) -> bool:
+    """非破坏性预检 accounts.x.ai / grok.com 的连通性与 Cloudflare 状态。"""
+    targets = ("https://accounts.x.ai/", "https://grok.com/")
+    req_proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    for url in targets:
+        try:
+            started = time.monotonic()
+            resp = requests.get(url, proxies=req_proxies, timeout=15, allow_redirects=False)
+            latency = int((time.monotonic() - started) * 1000)
+            status_code = int(resp.status_code)
+            headers = {str(k).lower(): str(v).lower() for k, v in dict(getattr(resp, "headers", {}) or {}).items()}
+            text = str(getattr(resp, "text", "") or "")[:4096].lower()
+            cf_blocked = ("cloudflare" in headers.get("server", "") or "cf-error" in text) and status_code in (403, 429, 503)
+            if cf_blocked:
+                if log_callback:
+                    log_callback(f"[!] 路径预检告警: {url} 遭遇 Cloudflare 阻断 (HTTP {status_code})")
+                return False
+            if log_callback:
+                log_callback(f"[+] 路径预检正常: {url} (HTTP {status_code}, 延迟 {latency}ms)")
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[!] 路径预检异常: {url} 连接失败: {exc}")
+            return False
+    return True
 
 
 def _detect_chromium_path() -> str:
@@ -135,6 +163,20 @@ def run_browser_registration(
     sso = ""
     profile: dict[str, Any] = {}
     try:
+        # A. 执行注册路径非破坏性预检
+        if cfg.get("proxy_pool_preflight_enabled", True):
+            _log_cb("[*] 正在执行注册路径预检 (accounts.x.ai / grok.com)...")
+            preflight_ok = _preflight_registration_path(proxy_url=active_proxy, log_callback=_log_cb)
+            if not preflight_ok:
+                raise RuntimeError("注册路径预检失败：目标站点不可达或遭遇 Cloudflare 阻断，已终止本次尝试")
+
+        # B. 出口国家与网络环境自适应对齐（多国支持）
+        if us_consistency.enabled():
+            expect_c = str(cfg.get("us_consistency_expect_country") or "").strip()
+            detected_zone = us_consistency.align_timezone_with_proxy(active_proxy, expect_country=expect_c)
+            if detected_zone:
+                _log_cb(f"[*] {us_consistency.describe()}")
+
         _log_cb("[*] 正在启动 Chromium 浏览器实例...")
         use_proxy = not is_direct
         registration_browser.start_browser(log_callback=_log_cb, use_proxy=use_proxy)
