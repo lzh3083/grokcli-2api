@@ -101,6 +101,14 @@ func (c *Client) SSOImportJob(ctx context.Context, jobID string) (map[string]any
 	return c.doAbsolute(ctx, http.MethodGet, "/internal/sso/v1/jobs/"+url.PathEscape(jobID), nil, nil)
 }
 
+func (c *Client) NovProxyExtract(ctx context.Context, request map[string]any) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/novproxy", request, nil)
+}
+
+func (c *Client) ProxyPoolProbe(ctx context.Context, request map[string]any) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/proxy-pool/probe", request, nil)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, headers http.Header) (map[string]any, error) {
 	return c.doAbsolute(ctx, method, "/internal/registration/"+APIVersion+path, body, headers)
 }

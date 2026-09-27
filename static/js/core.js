@@ -6064,6 +6064,18 @@ function bindRegMailFormControls() {
   } catch (e) {
     console.warn("bindRegMailFormControls paint", e);
   }
+  try {
+    if ($("btn-novproxy-extract")) $("btn-novproxy-extract").onclick = () => { extractNovProxyNodes().catch(() => {}); };
+    if ($("btn-probe-proxy-nodes")) $("btn-probe-proxy-nodes").onclick = () => { probeProxyPoolNodes().catch(() => {}); };
+    if ($("btn-clear-proxy-nodes")) $("btn-clear-proxy-nodes").onclick = () => { clearProxyPoolNodes(); };
+    if ($("reg-proxy") && !$("reg-proxy")._boundProxyTable) {
+      $("reg-proxy")._boundProxyTable = true;
+      $("reg-proxy").addEventListener("input", () => { renderProxyNodesTable(); });
+    }
+    renderProxyNodesTable();
+  } catch (e) {
+    console.warn("bind proxy table controls", e);
+  }
 }
 
 // Document-level delegation: single handler, survives soft-nav HTML swaps.
@@ -6149,6 +6161,10 @@ function readRegConfig() {
     proxy_username: $("reg-proxy-username") ? $("reg-proxy-username").value.trim() : "",
     proxy_password: $("reg-proxy-password") ? $("reg-proxy-password").value.trim() : "",
     proxy_strategy: $("reg-proxy-strategy") ? $("reg-proxy-strategy").value.trim() : "round_robin",
+    novproxy_api: $("reg-novproxy-api") ? $("reg-novproxy-api").value.trim() : "https://white.novproxy.com/white/api",
+    novproxy_region: $("reg-novproxy-region") ? $("reg-novproxy-region").value.trim() : "US",
+    novproxy_minutes: $("reg-novproxy-minutes") ? $("reg-novproxy-minutes").value.trim() : "60",
+    novproxy_num: $("reg-novproxy-num") ? $("reg-novproxy-num").value.trim() : "1",
     count: $("reg-count") ? $("reg-count").value.trim() : "1",
     concurrency: $("reg-concurrency") ? $("reg-concurrency").value.trim() : "2",
     stagger_ms: $("reg-stagger-ms") ? $("reg-stagger-ms").value.trim() : "300",
@@ -6357,9 +6373,196 @@ function applyRegConfig(cfg) {
   if ($("reg-sso-risk-rejected-file")) {
     $("reg-sso-risk-rejected-file").value = cfg.sso_risk_rejected_file || "./sso_risk_rejected.txt";
   }
+  if ($("reg-novproxy-api")) {
+    $("reg-novproxy-api").value = cfg.novproxy_api || "https://white.novproxy.com/white/api";
+  }
+  if ($("reg-novproxy-region")) {
+    $("reg-novproxy-region").value = cfg.novproxy_region || "US";
+  }
+  if ($("reg-novproxy-minutes")) {
+    $("reg-novproxy-minutes").value = cfg.novproxy_minutes != null ? String(cfg.novproxy_minutes) : "60";
+  }
+  if ($("reg-novproxy-num")) {
+    $("reg-novproxy-num").value = cfg.novproxy_num != null ? String(cfg.novproxy_num) : "1";
+  }
+  renderProxyNodesTable();
   syncRegCaptchaProviderUI();
   syncRegMailProviderUI();
   regConfigCache = Object.assign({}, cfg);
+}
+
+function g2aEscapeHtml(str) {
+  return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let lastProxyNodesCache = [];
+
+function renderProxyNodesTable(nodesData) {
+  const tbody = $("proxy-nodes-table-body");
+  const summary = $("proxy-nodes-summary");
+  if (!tbody) return;
+
+  let list = [];
+  if (Array.isArray(nodesData)) {
+    list = nodesData;
+    lastProxyNodesCache = list;
+  } else if (typeof nodesData === "string") {
+    list = nodesData.split("\n").map((s) => s.trim()).filter(Boolean).map((n) => ({ raw: n, node: n }));
+    lastProxyNodesCache = list;
+  } else if (lastProxyNodesCache && lastProxyNodesCache.length > 0) {
+    list = lastProxyNodesCache;
+  } else {
+    const rawVal = $("reg-proxy") ? $("reg-proxy").value.trim() : "";
+    list = rawVal.split("\n").map((s) => s.trim()).filter(Boolean).map((n) => ({ raw: n, node: n }));
+    lastProxyNodesCache = list;
+  }
+
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:16px;color:var(--ant-color-text-secondary, #888)">暂无代理节点（直连模式）</td></tr>`;
+    if (summary) summary.textContent = "未配置代理（直连模式）";
+    return;
+  }
+
+  let healthyCount = 0;
+  let unhealthyCount = 0;
+  let unprobedCount = 0;
+
+  const rowsHtml = list.map((item, idx) => {
+    const rawAddr = item.raw || item.node || "";
+    let maskedAddr = rawAddr;
+    try {
+      if (maskedAddr.includes("@")) {
+        const parts = maskedAddr.split("@");
+        const pre = parts[0].split("://");
+        const scheme = pre.length > 1 ? pre[0] + "://" : "";
+        const cred = pre.length > 1 ? pre[1] : pre[0];
+        const user = cred.split(":")[0];
+        maskedAddr = `${scheme}${user}:***@${parts[1]}`;
+      }
+    } catch (_) {}
+
+    const isProbed = item.exit_ip || item.ok !== undefined || item.reason;
+    let dotColor = "#8c8c8c";
+    let healthText = "— · 未产生业务样本";
+    let exitText = "—";
+
+    if (!isProbed) {
+      unprobedCount++;
+      dotColor = "#8c8c8c";
+    } else if (item.ok) {
+      healthyCount++;
+      dotColor = "#52c41a";
+      const loc = [item.country, item.city].filter(Boolean).join(" - ");
+      exitText = item.exit_ip ? `${item.exit_ip}${loc ? " (" + loc + ")" : ""}` : "—";
+      healthText = `健康 · ${item.hosting ? "机房IP" : "住宅IP"}`;
+    } else {
+      unhealthyCount++;
+      dotColor = "#ff4d4f";
+      exitText = item.exit_ip || "—";
+      healthText = `异常 · ${item.reason || "探测失败"}`;
+    }
+
+    const dotStyle = `display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:6px`;
+
+    return `<tr style="border-bottom:1px solid var(--ant-color-border-secondary, #303030)">
+      <td style="padding:6px 10px"><span style="${dotStyle}"></span>节点 ${idx + 1}</td>
+      <td style="padding:6px 10px;font-family:monospace">${g2aEscapeHtml(exitText)}</td>
+      <td style="padding:6px 10px">${g2aEscapeHtml(healthText)}</td>
+      <td style="padding:6px 10px;font-family:monospace" title="${g2aEscapeHtml(rawAddr)}">${g2aEscapeHtml(maskedAddr)}</td>
+    </tr>`;
+  }).join("");
+
+  tbody.innerHTML = rowsHtml;
+
+  if (summary) {
+    const parts = [`pool · ${list.length} 个节点`];
+    if (healthyCount) parts.push(`${healthyCount} 健康`);
+    if (unhealthyCount) parts.push(`${unhealthyCount} 异常`);
+    if (unprobedCount) parts.push(`${unprobedCount} 未测试`);
+    summary.textContent = parts.join(" · ");
+  }
+}
+
+async function extractNovProxyNodes() {
+  const btn = $("btn-novproxy-extract");
+  if (!btn) return;
+  const originalText = btn.textContent;
+  try {
+    btn.disabled = true;
+    btn.textContent = "提取并预热中...";
+    const req = {
+      novproxy_api: $("reg-novproxy-api") ? $("reg-novproxy-api").value.trim() : "",
+      novproxy_region: $("reg-novproxy-region") ? $("reg-novproxy-region").value.trim() : "US",
+      novproxy_minutes: Number($("reg-novproxy-minutes") ? $("reg-novproxy-minutes").value.trim() : 60),
+      novproxy_num: Number($("reg-novproxy-num") ? $("reg-novproxy-num").value.trim() : 1),
+    };
+    const r = await api("/accounts/register-email/novproxy", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+    if (!r.ok) {
+      throw new Error(r.detail || r.message || "提取失败");
+    }
+    const lines = r.lines || [];
+    if (lines.length) {
+      if ($("reg-proxy")) {
+        $("reg-proxy").value = lines.join("\n");
+      }
+      renderProxyNodesTable(r.nodes || lines);
+      toast(`成功提取并校验 ${lines.length} 个住宅代理节点`, true);
+    } else {
+      toast("未提取到可用节点", false);
+    }
+  } catch (err) {
+    toast(`NovProxy 提取错误: ${err.message}`, false);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+}
+
+async function probeProxyPoolNodes() {
+  const btn = $("btn-probe-proxy-nodes");
+  if (!btn) return;
+  const rawProxy = $("reg-proxy") ? $("reg-proxy").value.trim() : "";
+  if (!rawProxy) {
+    toast("当前未配置代理（直连模式），无需测试", true);
+    renderProxyNodesTable([]);
+    return;
+  }
+  const lines = rawProxy.split("\n").map((s) => s.trim()).filter(Boolean);
+  const originalText = btn.textContent;
+  try {
+    btn.disabled = true;
+    btn.textContent = "测试中...";
+    const r = await api("/accounts/register-email/proxy-probe", {
+      method: "POST",
+      body: JSON.stringify({ proxies: lines }),
+    });
+    if (!r.ok) {
+      throw new Error(r.detail || r.message || "探测失败");
+    }
+    const nodes = r.nodes || [];
+    renderProxyNodesTable(nodes);
+    const good = nodes.filter((n) => n.ok).length;
+    toast(`代理节点健康测试完成：${good}/${nodes.length} 正常`, good > 0);
+  } catch (err) {
+    toast(`代理测试失败: ${err.message}`, false);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+}
+
+function clearProxyPoolNodes() {
+  if ($("reg-proxy")) $("reg-proxy").value = "";
+  lastProxyNodesCache = [];
+  renderProxyNodesTable([]);
+  toast("已清空代理池，切换为直连模式");
 }
 
 function cacheRegConfigLocal(cfg) {
@@ -10435,6 +10638,15 @@ if ($("btn-close-reg-inline") && !$("btn-close-reg-inline").onclick) {
     dismissRegProgressCard();
     toast("已关闭进度卡片（后台注册不受影响）");
   });
+}
+if ($("btn-novproxy-extract") && !$("btn-novproxy-extract").onclick) {
+  on("btn-novproxy-extract", "onclick", () => { extractNovProxyNodes().catch(() => {}); });
+}
+if ($("btn-probe-proxy-nodes") && !$("btn-probe-proxy-nodes").onclick) {
+  on("btn-probe-proxy-nodes", "onclick", () => { probeProxyPoolNodes().catch(() => {}); });
+}
+if ($("btn-clear-proxy-nodes") && !$("btn-clear-proxy-nodes").onclick) {
+  on("btn-clear-proxy-nodes", "onclick", () => { clearProxyPoolNodes(); });
 }
 // First paint + soft-nav: single entry that rebinds select + paints panels.
 try { bindRegMailFormControls(); } catch (_) {

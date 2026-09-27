@@ -835,6 +835,89 @@ def sso_import_job(job_id: str, request: Request) -> dict[str, Any]:
     return ar._sso_public_job(job)
 
 
+@app.post(f"{API_PREFIX}/novproxy")
+async def extract_novproxy(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    api_base = str(body.get("novproxy_api") or "https://white.novproxy.com/white/api").strip()
+    region = str(body.get("novproxy_region") or "US").strip()
+    minutes = int(body.get("novproxy_minutes") or 120)
+    num = int(body.get("novproxy_num") or 1)
+    expect_country = str(body.get("expect_country") or region or "US").strip().upper()
+
+    from grok2api.upstream.browser_register import novproxy
+
+    out_path = "/app/data/novproxy_nodes.txt"
+    try:
+        good = novproxy.generate(
+            api_base=api_base,
+            out_path=out_path,
+            region=region,
+            want=num,
+            minutes=minutes,
+            expect_country=expect_country,
+            workers=min(10, max(2, num)),
+            attempts=3,
+            rounds=2,
+            log=lambda m: print(f"[novproxy] {m}"),
+        )
+        lines = []
+        for n in good:
+            node_str = n.get("node") if isinstance(n, dict) else str(n)
+            if not node_str.startswith("socks5h://") and not node_str.startswith("http://"):
+                node_str = "socks5h://" + node_str
+            lines.append(node_str)
+        return {
+            "ok": True,
+            "count": len(good),
+            "nodes": good,
+            "lines": lines,
+            "message": f"成功提取并验证 {len(good)} 个住宅代理节点",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"NovProxy 提取失败: {exc}") from exc
+
+
+@app.post(f"{API_PREFIX}/proxy-pool/probe")
+async def probe_proxy_pool(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    proxies = body.get("proxies") or []
+    if isinstance(proxies, str):
+        proxies = [p.strip() for p in proxies.splitlines() if p.strip()]
+    if not isinstance(proxies, list):
+        proxies = []
+
+    from grok2api.upstream.browser_register import novproxy
+    import concurrent.futures
+
+    def _test_one(proxy_raw: str) -> dict[str, Any]:
+        p = proxy_raw.strip()
+        node_addr = p
+        for prefix in ("socks5h://", "socks5://", "http://", "https://"):
+            if node_addr.startswith(prefix):
+                node_addr = node_addr[len(prefix):]
+                break
+        res = novproxy.probe_node(node_addr, expect_country="", timeout=15.0)
+        res["raw"] = p
+        return res
+
+    results = []
+    if proxies:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(proxies))) as pool:
+            results = list(pool.map(_test_one, proxies))
+
+    return {"ok": True, "count": len(results), "nodes": results}
+
+
 @app.exception_handler(HTTPException)
 async def http_error_handler(_: Request, exc: HTTPException) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})

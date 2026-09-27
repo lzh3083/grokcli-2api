@@ -421,6 +421,12 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/accounts/register-email/test-proxy", func(w http.ResponseWriter, r *http.Request) {
 		serveRegistrationProxyTest(w, r, options)
 	})
+	mux.HandleFunc("POST /admin/api/accounts/register-email/novproxy", func(w http.ResponseWriter, r *http.Request) {
+		serveNovProxyExtract(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/accounts/register-email/proxy-probe", func(w http.ResponseWriter, r *http.Request) {
+		serveProxyPoolProbe(w, r, options)
+	})
 	mux.HandleFunc("POST /admin/api/register-email/test-proxy", func(w http.ResponseWriter, r *http.Request) {
 		serveRegistrationProxyTest(w, r, options)
 	})
@@ -4872,6 +4878,50 @@ func serveRegistrationProxyTest(w http.ResponseWriter, r *http.Request, options 
 		"probe_host":    probeHost,
 		"message":       msg,
 	})
+}
+
+func serveNovProxyExtract(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	res, err := client.NovProxyExtract(r.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func serveProxyPoolProbe(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	res, err := client.ProxyPoolProbe(r.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // canonicalizeRegistrationProxyLine normalizes common proxy paste formats into a URL.

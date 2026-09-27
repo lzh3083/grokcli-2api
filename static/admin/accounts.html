@@ -500,7 +500,35 @@
         <option value="0">永久</option>
       </select>
     </div>
+    <div class="g2a-field g2a-field-span2" style="margin:12px 0 4px;padding-top:12px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
+      <div style="font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between">
+        <span>NovProxy 住宅代理 (一号一IP)</span>
+      </div>
+    </div>
     <div class="g2a-field g2a-field-span2">
+      <label for="reg-novproxy-api">NovProxy 提取接口</label>
+      <input id="reg-novproxy-api" placeholder="https://white.novproxy.com/white/api" value="https://white.novproxy.com/white/api" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">动态住宅代理 API 提取地址，返回格式为 host:port。</div>
+    </div>
+    <div class="g2a-field">
+      <label for="reg-novproxy-region">NovProxy 地区代码</label>
+      <input id="reg-novproxy-region" placeholder="US" value="US" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">目标地区代码，默认 US。</div>
+    </div>
+    <div class="g2a-field">
+      <label for="reg-novproxy-minutes">NovProxy 粘性时长 (分钟)</label>
+      <input id="reg-novproxy-minutes" type="number" min="1" max="1440" value="60" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">住宅 IP 保持时间，默认 120 分钟（覆盖注册及 CPA 导出全流程）。</div>
+    </div>
+    <div class="g2a-field">
+      <label for="reg-novproxy-num">NovProxy 提取数量 (num=N)</label>
+      <input id="reg-novproxy-num" type="number" min="1" max="500" value="1" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">建议与注册数量匹配：一账号独占一个出口 IP，避免同 IP 关联。</div>
+    </div>
+    <div class="g2a-field" style="display:flex;align-items:flex-end">
+      <button class="g2a-btn g2a-btn-primary" id="btn-novproxy-extract" type="button" style="width:100%">提取 NovProxy 节点 (一号一IP)</button>
+    </div>
+    <div class="g2a-field g2a-field-span2" style="margin-top:8px">
       <label for="reg-proxy" title="支持代理池：每行一个；也可用逗号/分号分隔。格式：http://host:port 或 host:port:user:pass 或 socks5://...">代理池</label>
       <textarea id="reg-proxy" rows="3" placeholder="可选，每行一个代理&#10;http://host:port&#10;host:port:user:pass&#10;socks5://user:pass@host:port" spellcheck="false"></textarea>
       <p class="g2a-muted" style="margin:4px 0 0" id="reg-proxy-hint">支持多行代理池；批量注册时按策略轮换。共享账号可填下方用户名/密码。</p>
@@ -514,6 +542,33 @@
         <option value="random">随机 (random)</option>
         <option value="sticky">固定首个 (sticky)</option>
       </select>
+    </div>
+    <div class="g2a-field g2a-field-span2" style="margin-top:10px;padding-top:12px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
+      <div style="font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between">
+        <span>代理节点状态</span>
+        <div style="display:flex;gap:8px">
+          <button class="g2a-btn g2a-btn-default g2a-btn-sm" id="btn-probe-proxy-nodes" type="button">测试节点健康</button>
+          <button class="g2a-btn g2a-btn-default g2a-btn-sm" id="btn-clear-proxy-nodes" type="button">清空代理池</button>
+        </div>
+      </div>
+      <div id="proxy-nodes-summary" class="g2a-muted" style="margin:4px 0 8px;font-size:12px">未配置代理（直连模式）</div>
+      <div style="overflow-x:auto;max-height:260px;border:1px solid var(--ant-color-border-secondary, #303030);border-radius:6px">
+        <table class="g2a-table" style="width:100%;font-size:12.5px;text-align:left">
+          <thead>
+            <tr style="background:var(--ant-color-fill-quaternary, rgba(255,255,255,0.04))">
+              <th style="padding:6px 10px;width:100px">节点</th>
+              <th style="padding:6px 10px;width:220px">出口 IP</th>
+              <th style="padding:6px 10px;width:120px">运行健康</th>
+              <th style="padding:6px 10px">代理地址</th>
+            </tr>
+          </thead>
+          <tbody id="proxy-nodes-table-body">
+            <tr>
+              <td colspan="4" style="text-align:center;padding:16px;color:var(--ant-color-text-secondary, #888)">暂无代理节点（直连模式）</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
   <div id="reg-session-box" class="g2a-subcard hidden" style="margin-top:12px" hidden>
