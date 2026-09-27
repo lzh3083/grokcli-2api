@@ -83,7 +83,7 @@ func New(store *postgres.Connector, redisClient *redis.Client, upstream string, 
 		models = normalizeModels(splitCSV(os.Getenv("GROK2API_PROBE_MODELS")))
 	}
 	if len(models) == 0 {
-		models = []string{"grok-4.5"}
+		models = []string{"grok-4.5", "grok-4.6", "grok-4.7"}
 	}
 	return &Service{
 		Store:    store,
@@ -147,6 +147,20 @@ func (s *Service) Knobs() (interval time.Duration, batch, workers int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Interval, s.Batch, s.Workers
+}
+
+// SetModels hot-updates the probed models list.
+func (s *Service) SetModels(models []string) {
+	if s == nil {
+		return
+	}
+	norm := normalizeModels(models)
+	if len(norm) == 0 {
+		norm = []string{"grok-4.5", "grok-4.6", "grok-4.7"}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Models = norm
 }
 
 func newProbeHTTPClient() *http.Client {

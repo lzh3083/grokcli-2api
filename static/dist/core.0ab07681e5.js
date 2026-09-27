@@ -9847,7 +9847,7 @@ function settingsGroupDefaults(group) {
         model_health_probe_batch: 120,
         model_health_probe_workers: 12,
         conversation_affinity_ttl_sec: 7200,
-        probe_models: "grok-4.5",
+        probe_models: "grok-4.5, grok-4.6, grok-4.7",
       };
     case "proxy":
       return {

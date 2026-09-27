@@ -124,6 +124,28 @@ func (o Options) applySettingsToRuntime(settings map[string]any) {
 			workers = int(v)
 		}
 		o.ModelHealth.Configure(intervalSec, batch, workers)
+		if pm, ok := settings["probe_models"]; ok {
+			var pms []string
+			switch v := pm.(type) {
+			case []string:
+				pms = v
+			case []any:
+				for _, it := range v {
+					if str, ok := it.(string); ok && strings.TrimSpace(str) != "" {
+						pms = append(pms, strings.TrimSpace(str))
+					}
+				}
+			case string:
+				for _, part := range strings.Split(v, ",") {
+					if strings.TrimSpace(part) != "" {
+						pms = append(pms, strings.TrimSpace(part))
+					}
+				}
+			}
+			if len(pms) > 0 {
+				o.ModelHealth.SetModels(pms)
+			}
+		}
 	}
 	// History compact knobs live in historycompact package (not Config struct).
 	applyHistoryCompactSettings(settings)

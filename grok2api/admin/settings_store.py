@@ -1677,9 +1677,9 @@ def get_probe_models() -> list[str]:
         env_models = [str(m).strip() for m in (PROBE_MODELS or []) if str(m).strip()]
         if env_models:
             return env_models
-        return [str(DEFAULT_MODEL or "grok-4.5")]
+        return [str(DEFAULT_MODEL or "grok-4.5"), "grok-4.6", "grok-4.7"]
     except Exception:
-        return ["grok-4.5"]
+        return ["grok-4.5", "grok-4.6", "grok-4.7"]
 
 
 def set_probe_models(value: Any) -> list[str]:
@@ -1688,9 +1688,9 @@ def set_probe_models(value: Any) -> list[str]:
         try:
             from grok2api.config import DEFAULT_MODEL
 
-            models = [str(DEFAULT_MODEL or "grok-4.5")]
+            models = [str(DEFAULT_MODEL or "grok-4.5"), "grok-4.6", "grok-4.7"]
         except Exception:
-            models = ["grok-4.5"]
+            models = ["grok-4.5", "grok-4.6", "grok-4.7"]
     # Persist as comma-separated for simple UI round-trip
     joined = ", ".join(models)
     _set_setting_value("probe_models", joined)

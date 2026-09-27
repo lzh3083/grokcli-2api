@@ -82,7 +82,7 @@ func main() {
 	if store != nil {
 		oidcClient := &oidc.Client{}
 		maintSvc = maintainer.New(store, redisClient, oidcClient)
-		healthSvc = modelhealth.New(store, redisClient, cfg.UpstreamBase, []string{cfg.DefaultModel})
+		healthSvc = modelhealth.New(store, redisClient, cfg.UpstreamBase, []string{cfg.DefaultModel, "grok-4.6", "grok-4.7"})
 		if leader != nil {
 			maintSvc.IsLeader = leader.IsLeader
 			healthSvc.IsLeader = leader.IsLeader
@@ -164,6 +164,28 @@ func main() {
 					workers = int(v)
 				}
 				healthSvc.Configure(intervalSec, batch, workers)
+				if pm, ok := settings["probe_models"]; ok {
+					var pms []string
+					switch v := pm.(type) {
+					case []string:
+						pms = v
+					case []any:
+						for _, it := range v {
+							if str, ok := it.(string); ok && strings.TrimSpace(str) != "" {
+								pms = append(pms, strings.TrimSpace(str))
+							}
+						}
+					case string:
+						for _, part := range strings.Split(v, ",") {
+							if strings.TrimSpace(part) != "" {
+								pms = append(pms, strings.TrimSpace(part))
+							}
+						}
+					}
+					if len(pms) > 0 {
+						healthSvc.SetModels(pms)
+					}
+				}
 			}
 			// History compact: admin DB settings must override env defaults for Codex long sessions.
 			{

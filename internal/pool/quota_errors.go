@@ -558,6 +558,12 @@ func ExtractModelName(errText string) string {
 	if strings.HasPrefix(lname, "grok-4.5") {
 		return "grok-4.5"
 	}
+	if strings.HasPrefix(lname, "grok-4.6") {
+		return "grok-4.6"
+	}
+	if strings.HasPrefix(lname, "grok-4.7") {
+		return "grok-4.7"
+	}
 	return name
 }
 

@@ -121,6 +121,8 @@ func mergeExtraModels(models []map[string]any, defaultModel string) []map[string
 	}
 	now := time.Now().Unix()
 	for _, extra := range []map[string]any{
+		{"id": "grok-4.6", "name": "Grok 4.6", "description": "xAI Grok 4.6", "owned_by": "xai"},
+		{"id": "grok-4.7", "name": "Grok 4.7", "description": "xAI Grok 4.7", "owned_by": "xai"},
 		{"id": "grok-build", "name": "Grok Build", "description": "Grok coding / build model (cli-chat-proxy)", "owned_by": "xai"},
 		{"id": "grok-search", "name": "Grok Search", "description": "Grok with web search enabled (local alias)", "owned_by": "xai"},
 	} {
