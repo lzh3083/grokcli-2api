@@ -346,6 +346,53 @@
     </div>
   </div>
   <div class="g2a-form-grid">
+    <div class="g2a-field g2a-field-span2" style="margin-bottom:2px">
+      <div style="font-weight:600;font-size:14px">浏览器环境与风控安全配置</div>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label class="g2a-check">
+        <input type="checkbox" id="reg-preflight-enabled" checked />
+        <strong>注册路径预检</strong>
+      </label>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">保留非破坏性的 accounts.x.ai / grok.com 可达性预检能力。</div>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label class="g2a-check">
+        <input type="checkbox" id="reg-us-consistency-enabled" checked />
+        <strong>美国 / 网络环境一致性</strong>
+      </label>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">统一浏览器时区/语言/platform，消除"IP 与时区/平台自相矛盾"这类特征。关闭即退回原版行为。</div>
+    </div>
+    <div class="g2a-field">
+      <label for="reg-consistency-timezone">浏览器时区</label>
+      <input id="reg-consistency-timezone" placeholder="留空自动按出口IP对齐 (如 America/New_York)" />
+    </div>
+    <div class="g2a-field">
+      <label for="reg-consistency-locale">浏览器语言</label>
+      <input id="reg-consistency-locale" placeholder="留空自动按出口国家对齐 (如 en-US, ja-JP)" />
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label class="g2a-check">
+        <input type="checkbox" id="reg-enable-nsfw" checked />
+        <strong>启用 NSFW (后处理开关)</strong>
+      </label>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">注册成功提取 SSO 后，自动通过 gRPC 开启账号成人/敏感内容权限。</div>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label class="g2a-check">
+        <input type="checkbox" id="reg-sso-risk-enabled" checked />
+        <strong>SSO 风控早停</strong>
+      </label>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">入库前检查 grok.com botFlagSource / policy=deny。</div>
+    </div>
+    <div class="g2a-field g2a-field-span2">
+      <label for="reg-sso-risk-rejected-file">风控隔离文件</label>
+      <input id="reg-sso-risk-rejected-file" value="./sso_risk_rejected.txt" placeholder="./sso_risk_rejected.txt" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">命中风控标记时，账号将保存至此隔离文件并拒绝入库。</div>
+    </div>
+    <div class="g2a-field g2a-field-span2" style="margin:10px 0 4px;padding-top:12px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
+      <div style="font-weight:600;font-size:14px">邮箱与服务配置</div>
+    </div>
     <div class="g2a-field">
       <label for="reg-mail-provider">邮箱服务</label>
       <select id="reg-mail-provider">
@@ -467,50 +514,6 @@
         <option value="random">随机 (random)</option>
         <option value="sticky">固定首个 (sticky)</option>
       </select>
-    </div>
-    <div class="g2a-field g2a-field-span2" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
-      <div style="font-weight:600;font-size:14px;margin-bottom:8px">浏览器环境与风控安全配置</div>
-    </div>
-    <div class="g2a-field g2a-field-span2">
-      <label class="g2a-check">
-        <input type="checkbox" id="reg-preflight-enabled" checked />
-        <strong>注册路径预检</strong>
-      </label>
-      <div class="g2a-muted" style="margin-top:2px;font-size:12px">保留非破坏性的 accounts.x.ai / grok.com 可达性预检能力。</div>
-    </div>
-    <div class="g2a-field g2a-field-span2">
-      <label class="g2a-check">
-        <input type="checkbox" id="reg-us-consistency-enabled" checked />
-        <strong>美国 / 网络环境一致性</strong>
-      </label>
-      <div class="g2a-muted" style="margin-top:2px;font-size:12px">统一浏览器时区/语言/platform，消除"IP 与时区/平台自相矛盾"这类特征。关闭即退回原版行为。</div>
-    </div>
-    <div class="g2a-field">
-      <label for="reg-consistency-timezone">浏览器时区</label>
-      <input id="reg-consistency-timezone" placeholder="留空自动按出口IP对齐 (如 America/New_York)" />
-    </div>
-    <div class="g2a-field">
-      <label for="reg-consistency-locale">浏览器语言</label>
-      <input id="reg-consistency-locale" placeholder="留空自动按出口国家对齐 (如 en-US, ja-JP)" />
-    </div>
-    <div class="g2a-field g2a-field-span2">
-      <label class="g2a-check">
-        <input type="checkbox" id="reg-enable-nsfw" checked />
-        <strong>启用 NSFW (后处理开关)</strong>
-      </label>
-      <div class="g2a-muted" style="margin-top:2px;font-size:12px">注册成功提取 SSO 后，自动通过 gRPC 开启账号成人/敏感内容权限。</div>
-    </div>
-    <div class="g2a-field g2a-field-span2">
-      <label class="g2a-check">
-        <input type="checkbox" id="reg-sso-risk-enabled" checked />
-        <strong>SSO 风控早停</strong>
-      </label>
-      <div class="g2a-muted" style="margin-top:2px;font-size:12px">入库前检查 grok.com botFlagSource / policy=deny。</div>
-    </div>
-    <div class="g2a-field g2a-field-span2">
-      <label for="reg-sso-risk-rejected-file">风控隔离文件</label>
-      <input id="reg-sso-risk-rejected-file" value="./sso_risk_rejected.txt" placeholder="./sso_risk_rejected.txt" />
-      <div class="g2a-muted" style="margin-top:2px;font-size:12px">命中风控标记时，账号将保存至此隔离文件并拒绝入库。</div>
     </div>
   </div>
   <div id="reg-session-box" class="g2a-subcard hidden" style="margin-top:12px" hidden>
