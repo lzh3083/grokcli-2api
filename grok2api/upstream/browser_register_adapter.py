@@ -35,7 +35,13 @@ def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[st
     for url in targets:
         try:
             started = time.monotonic()
-            resp = requests.get(url, proxies=req_proxies, timeout=15, allow_redirects=False)
+            resp = requests.get(
+                url,
+                proxies=req_proxies,
+                impersonate="chrome124",
+                timeout=15,
+                allow_redirects=False,
+            )
             latency = int((time.monotonic() - started) * 1000)
             status_code = int(resp.status_code)
             headers = {str(k).lower(): str(v).lower() for k, v in dict(getattr(resp, "headers", {}) or {}).items()}
