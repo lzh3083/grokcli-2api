@@ -511,6 +511,46 @@
       </select>
       <div class="g2a-muted" style="margin-top:2px;font-size:12px">支持自动生成独占住宅 IP 会话，或通过官方 API 白名单批量拉取。</div>
     </div>
+    <script>
+      (function() {
+        function doSync() {
+          var sel = document.getElementById("reg-novproxy-mode");
+          var mode = sel ? sel.value : "userpass";
+          var isUserPass = mode === "userpass";
+          var upPanels = document.querySelectorAll(".novproxy-up-panel");
+          var apiPanels = document.querySelectorAll(".novproxy-api-panel");
+          for (var i = 0; i < upPanels.length; i++) {
+            if (isUserPass) {
+              upPanels[i].style.removeProperty("display");
+              upPanels[i].removeAttribute("hidden");
+            } else {
+              upPanels[i].style.setProperty("display", "none", "important");
+              upPanels[i].setAttribute("hidden", "true");
+            }
+          }
+          for (var j = 0; j < apiPanels.length; j++) {
+            if (!isUserPass) {
+              apiPanels[j].style.removeProperty("display");
+              apiPanels[j].removeAttribute("hidden");
+              if (apiPanels[j].id === "novproxy-panel-api-btn") {
+                apiPanels[j].style.setProperty("display", "flex", "important");
+              } else {
+                apiPanels[j].style.setProperty("display", "block", "important");
+              }
+            } else {
+              apiPanels[j].style.setProperty("display", "none", "important");
+              apiPanels[j].setAttribute("hidden", "true");
+            }
+          }
+        }
+        window.syncNovProxyModeUI = doSync;
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", doSync);
+        } else {
+          setTimeout(doSync, 10);
+        }
+      })();
+    </script>
 
     <!-- 账密模式面板 -->
     <div class="g2a-field novproxy-up-panel" id="novproxy-panel-up-host">
@@ -758,6 +798,6 @@
   <script src="/static/dist/api.443dfc63c0.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/state.5846ce62e4.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/auth.539061a1a7.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.cfc11b8162.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.2b476c37ce.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>
