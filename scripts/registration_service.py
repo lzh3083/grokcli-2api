@@ -410,6 +410,27 @@ async def start_job(
                 status_code=400,
                 detail="MoeMail Base URL missing. Re-save MoeMail Base URL in 协议注册配置.",
             )
+    # Browser-engine preferences (enable_nsfw / us_consistency_* / sso_risk_* /
+    # proxy_pool_preflight_enabled) are read from the *session dict* by
+    # browser_register_adapter.run_browser_registration — they are NOT
+    # start_registration kwargs. Passing them straight through raised
+    # "start_registration() got an unexpected keyword argument 'enable_nsfw'"
+    # and made every registration start return HTTP 500.
+    browser_session_keys = (
+        "proxy_pool_preflight_enabled",
+        "us_consistency_enabled",
+        "us_consistency_timezone",
+        "us_consistency_locale",
+        "enable_nsfw",
+        "sso_risk_gate_enabled",
+        "sso_risk_rejected_file",
+    )
+    session_overrides = {k: kwargs[k] for k in browser_session_keys if k in kwargs}
+    for _bsk in browser_session_keys:
+        kwargs.pop(_bsk, None)
+    if session_overrides:
+        kwargs["session_overrides"] = session_overrides
+
     # Drop non-adapter kwargs
     for drop in (
         "yyds_api_key", "gptmail_api_key", "cfmail_api_key", "tempmail_api_key", "cloudmail_api_key",

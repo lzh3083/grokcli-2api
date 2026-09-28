@@ -130,19 +130,31 @@ def _proxy_kwargs() -> dict:
                 curl_proxies_arg,
                 get_outbound_proxy_source,
                 first_working_proxy,
+                is_direct_proxy,
             )
         except Exception:
-            from proxy_pool import resolve_proxy_for_request, curl_proxies_arg  # type: ignore
+            from proxy_pool import (  # type: ignore
+                resolve_proxy_for_request,
+                curl_proxies_arg,
+                is_direct_proxy,
+            )
             get_outbound_proxy_source = None  # type: ignore
             first_working_proxy = None  # type: ignore
 
         url = resolve_proxy_for_request(fallback_env=True)
+        # A "direct"/"none"/"off" sentinel (bare or already wrapped as
+        # http://direct by older config) must not be handed to curl as a proxy:
+        # it would fail with "Could not resolve proxy: direct" and the whole
+        # device flow would look like an xAI rate limit.
+        if is_direct_proxy(url):
+            url = None
         if not url and get_outbound_proxy_source is not None:
             src = get_outbound_proxy_source() or {}
-            pool = list(src.get("pool") or [])
+            pool = [p for p in list(src.get("pool") or []) if not is_direct_proxy(p)]
             url = pool[0] if pool else None
         if not url and first_working_proxy is not None:
-            url = first_working_proxy()
+            candidate = first_working_proxy()
+            url = None if is_direct_proxy(candidate) else candidate
         proxies = curl_proxies_arg(url)
         if proxies:
             return {"proxies": proxies}
@@ -164,6 +176,12 @@ def _proxy_kwargs() -> dict:
             ),
             "",
         )
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy as _is_direct
+    except Exception:
+        from proxy_pool import is_direct_proxy as _is_direct  # type: ignore
+    if _is_direct(proxy):
+        return {}
     if proxy:
         return {"proxies": {"http": proxy, "https": proxy}}
     return {}
@@ -425,6 +443,7 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
         log(f"  📋 user_code: {dc.get('user_code')}")
 
         rate_limited = False
+        consent_fields: dict[str, str] = {}
         try:
             s.get(
                 dc["verification_uri_complete"],
@@ -441,6 +460,26 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
                 allow_redirects=True,
                 **proxy_kw,
             )
+            # The consent page carries a signed consent_token in a hidden input.
+            # /oauth2/device/approve rejects the request with
+            # 403 "Request could not be verified" unless that token is posted
+            # back, so scrape the form instead of hard-coding the fields.
+            try:
+                import re as _re
+
+                for _input in _re.findall(
+                    r"<input[^>]*>", str(getattr(r, "text", "") or ""), _re.I
+                ):
+                    _name = _re.search(r'name="([^"]*)"', _input, _re.I)
+                    if not _name:
+                        continue
+                    _value = _re.search(r'value="([^"]*)"', _input, _re.I)
+                    consent_fields[_name.group(1)] = _value.group(1) if _value else ""
+                if consent_fields:
+                    log(f"  📝 consent 字段: {sorted(consent_fields)}")
+            except Exception as _parse_exc:
+                log(f"  ⚠️ consent 解析失败: {_parse_exc}")
+
             if "consent" not in (r.url or ""):
                 log(f"  ❌ verify 失败: {r.url}")
                 if _is_rate_limited_payload(getattr(r, "text", None), r.url, getattr(r, "status_code", None)):
@@ -460,15 +499,29 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
             return None
 
         try:
-            r = s.post(
-                f"{OIDC_ISSUER}/oauth2/device/approve",
-                data={
+            # Replay the consent form verbatim (consent_token / principal_*),
+            # then force the fields the flow requires.
+            approve_data = dict(consent_fields)
+            approve_data.update(
+                {
                     "user_code": dc["user_code"],
                     "action": "allow",
-                    "principal_type": "User",
-                    "principal_id": "",
+                    "principal_type": approve_data.get("principal_type") or "User",
+                    "principal_id": approve_data.get("principal_id") or "",
+                }
+            )
+            r = s.post(
+                f"{OIDC_ISSUER}/oauth2/device/approve",
+                data=approve_data,
+                # xAI verifies the request origin on this endpoint: without
+                # Origin/Referer it answers 403 with its own
+                # "Request could not be verified" page (not a Cloudflare
+                # challenge, which is why clearance cookies did not help).
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://accounts.x.ai",
+                    "Referer": "https://accounts.x.ai/",
                 },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
                 impersonate="chrome",
                 timeout=timeout,
                 allow_redirects=True,

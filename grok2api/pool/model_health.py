@@ -110,6 +110,18 @@ def _probe_http_client(account_id: str | None = None) -> httpx.Client:
         except Exception:
             proxy_url = None
 
+    # The outbound pool can still hold a scheme-wrapped sentinel such as
+    # http://direct (persisted before normalize_proxy_config learned to reject
+    # it). httpx would treat that as a real host and fail the probe with
+    # "network: [Errno -3] Temporary failure in name resolution", which looks
+    # like a dead account. Normalise it to None so the probe goes direct.
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy
+    except Exception:  # pragma: no cover - sibling module
+        from proxy_pool import is_direct_proxy  # type: ignore
+    if is_direct_proxy(proxy_url):
+        proxy_url = None
+
     if not proxy_url:
         with _http_client_lock:
             if _http_client is None or _http_client.is_closed:

@@ -119,25 +119,9 @@ def run_browser_registration(
     if is_direct:
         cfg["proxy_mode"] = "direct"
         cfg["proxy"] = ""
-        # Direct mode: clear proxies.txt so Camoufox solver also runs direct
-        solver_proxy_file = captcha_solver.default_proxies_file()
-        if solver_proxy_file:
-            try:
-                Path(solver_proxy_file).write_text("", encoding="utf-8")
-            except Exception:
-                pass
     else:
         cfg["proxy_mode"] = "single"
         cfg["proxy"] = active_proxy
-        # Proxy mode: sync solver proxies.txt to exit via identical IP
-        try:
-            captcha_solver.sync_solver_proxy(
-                proxy=active_proxy,
-                proxies_file=cfg.get("captcha_solver_proxies_file"),
-                log=lambda m: print(f"[{sid}] {m}"),
-            )
-        except Exception as exc:
-            print(f"[{sid}] solver proxy sync warning: {exc}")
 
     # 3. Configure local Turnstile solver
     local_solver_url = (
@@ -145,16 +129,73 @@ def run_browser_registration(
         or os.environ.get("LOCAL_SOLVER_URL")
         or "http://127.0.0.1:5072"
     ).rstrip("/")
-    cfg["captcha_solver_enabled"] = True
+    # Honour the operator's switch instead of forcing the solver on. Both modes
+    # work: with the solver enabled its token is published to the page's React
+    # state (see registration_browser.inject_turnstile_token_into_react), and
+    # with it disabled we rely on Turnstile clearing itself.
+    cfg["captcha_solver_enabled"] = bool(cfg.get("captcha_solver_enabled", False))
     cfg["captcha_solver_provider"] = "yescaptcha"
     cfg["captcha_solver_api_base"] = local_solver_url
 
     # 4. Bind runtime configuration
     registration_browser.bind_runtime(cfg)
     browser_runtime.configure_runtime(cfg)
-    mail_service.bind_runtime(cfg)
+    # mail_service reads both cfg["config"] and flattened keys depending on the
+    # call site, so bind both spellings.
+    mail_service.bind_runtime({"config": cfg, **cfg})
+    # browser_register/__init__.py registers top-level aliases for these
+    # submodules, but one may already have been imported through the legacy
+    # top-level path before that ran. Re-bind such duplicates so no reader is
+    # left holding an unconfigured copy.
+    try:
+        import mail_service as _top_level_mail_service
+
+        if _top_level_mail_service is not mail_service:
+            _top_level_mail_service.bind_runtime({"config": cfg, **cfg})
+    except Exception as exc:
+        print(f"[{sid}] top-level mail_service bind skipped: {exc}", flush=True)
+    try:
+        import browser_runtime as _top_level_browser_runtime
+
+        if _top_level_browser_runtime is not browser_runtime:
+            _top_level_browser_runtime.configure_runtime(cfg)
+    except Exception as exc:
+        print(f"[{sid}] top-level browser_runtime bind skipped: {exc}", flush=True)
     captcha_solver.bind_runtime(cfg)
     sso_risk.configure_risk_runtime(cfg, browser_runtime.http_get)
+
+    # 4b. Point the local solver at the same egress as the registration browser.
+    # This must run after configure_runtime() so cfg is fully populated, and it
+    # deliberately does not use captcha_solver.sync_solver_proxy(): that helper
+    # resolves default_proxies_file() to a path inside the installed package,
+    # whereas api_solver.py reads proxies.txt from its own CWD
+    # (/app/turnstile-solver). A solver egress that differs from the browser's
+    # makes Cloudflare reject the solved token.
+    try:
+        solver_proxies_file = (
+            cfg.get("captcha_solver_proxies_file")
+            or os.environ.get("GROK2API_SOLVER_PROXIES_FILE")
+            or "/app/turnstile-solver/proxies.txt"
+        )
+        if is_direct:
+            solver_proxy_line = ""
+        else:
+            solver_proxy_line = str(active_proxy).strip()
+            # api_solver.py expects curl-style schemes, not Chromium's socks5h://.
+            if solver_proxy_line.startswith("socks5h://"):
+                solver_proxy_line = "socks5://" + solver_proxy_line[len("socks5h://"):]
+            elif solver_proxy_line.startswith("socks4a://"):
+                solver_proxy_line = "socks4://" + solver_proxy_line[len("socks4a://"):]
+        Path(solver_proxies_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(solver_proxies_file).write_text(
+            (solver_proxy_line + "\n") if solver_proxy_line else "", encoding="utf-8"
+        )
+        print(
+            f"[{sid}] solver proxy synced -> {solver_proxies_file} line={solver_proxy_line!r}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[{sid}] solver proxy sync warning: {exc}", flush=True)
 
     # 5. Define status update callbacks
     def _log_cb(msg: str) -> None:
@@ -187,7 +228,12 @@ def run_browser_registration(
         # A. 执行注册路径非破坏性预检
         if cfg.get("proxy_pool_preflight_enabled", True):
             _log_cb("[*] 正在执行注册路径预检 (accounts.x.ai / grok.com)...")
-            preflight_ok = _preflight_registration_path(proxy_url=active_proxy, log_callback=_log_cb)
+            # In direct mode active_proxy may hold a sentinel ("direct"/"none"/
+            # "off"/"0"). Passing that to requests makes it resolve a host named
+            # "direct" (curl: (5) Could not resolve proxy: direct) and the
+            # preflight aborts before the browser is ever started.
+            preflight_proxy = "" if is_direct else active_proxy
+            preflight_ok = _preflight_registration_path(proxy_url=preflight_proxy, log_callback=_log_cb)
             if not preflight_ok:
                 raise RuntimeError("注册路径预检失败：目标站点不可达或遭遇 Cloudflare 阻断，已终止本次尝试")
 

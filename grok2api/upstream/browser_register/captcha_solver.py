@@ -232,6 +232,22 @@ def is_local_endpoint(api_base):
     return False
 
 
+# Runtime config handed over by browser_register_adapter.run_browser_registration.
+# The adapter builds a per-session cfg (local solver URL, enabled flag, …) and
+# pushes it into every browser_register submodule via bind_runtime(); captcha_solver
+# was the only module missing that hook, so the adapter call raised
+# AttributeError: module ... captcha_solver has no attribute 'bind_runtime'
+# and every browser registration aborted before the browser even started.
+_BOUND_CONFIG: dict | None = None
+
+
+def bind_runtime(namespace):
+    """Receive the adapter's runtime cfg (mirrors registration_browser.bind_runtime)."""
+    global _BOUND_CONFIG
+    if isinstance(namespace, dict):
+        _BOUND_CONFIG = namespace
+
+
 def settings_from_config():
     """从 app_config 读打码配置。未启用或缺 key 时返回 None。
 
@@ -239,8 +255,10 @@ def settings_from_config():
     就把注册主流程带崩。CPA 流程与注册流程共用这一份读取逻辑。
     """
     try:
-        import app_config
-        cfg = getattr(app_config, "config", None)
+        cfg = _BOUND_CONFIG
+        if not isinstance(cfg, dict):
+            import app_config
+            cfg = getattr(app_config, "config", None)
         if not isinstance(cfg, dict):
             return None
         if not cfg.get("captcha_solver_enabled"):

@@ -56,6 +56,36 @@ DEFAULT_DEVICE_MEMORY = 8
 _CH_PLATFORM = '"Windows"'
 _CH_PLATFORM_VERSION = '"15.0.0"'  # Windows 11 的 UA-CH 平台版本
 
+
+def _chrome_version_from_ua() -> str:
+    """从配置的 User-Agent 里取 Chrome 主版本号。
+
+    Sec-CH-UA 必须与 User-Agent 里的版本一致：只改 UA 不改 UA-CH（或反过来）
+    都会留下可被服务端比对的矛盾。版本号从 user_agent 动态提取，避免两处
+    硬编码各自漂移。
+    """
+    ua = ""
+    try:
+        ua = str((_config or {}).get("user_agent") or "")
+    except Exception:
+        ua = ""
+    if not ua:
+        try:
+            import app_config
+
+            ua = str(getattr(app_config, "config", {}).get("user_agent") or "")
+        except Exception:
+            ua = ""
+    marker = "Chrome/"
+    if marker in ua:
+        major = ua.split(marker, 1)[1].split(" ", 1)[0].strip().split(".", 1)[0]
+        if major.isdigit():
+            return major
+    return "138"
+
+
+_CH_UA_BRANDS = '"Not(A:Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"'
+
 _config: dict = {}
 
 # 浏览器路径探测顺序。容器/服务器上 DrissionPage 默认找不到 Chrome，
@@ -356,6 +386,38 @@ def page_override_script() -> str:
   define(navigator, 'languages', ['%(locale)s', 'en']);
   define(navigator, 'language', '%(locale)s');
   define(navigator, 'webdriver', undefined);
+  // 只改请求头不改 JS 是没用的：页面脚本照样能从 navigator 读到真实版本，
+  // 服务端比对 User-Agent / Sec-CH-UA / navigator.userAgentData 就能发现伪造。
+  define(navigator, 'userAgent', '%(ua)s');
+  try {
+    if (navigator.userAgentData) {
+      const major = '%(major)s';
+      const brands = [
+        { brand: 'Not(A:Brand', version: '99' },
+        { brand: 'Google Chrome', version: major },
+        { brand: 'Chromium', version: major },
+      ];
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: () => ({
+          brands: brands,
+          mobile: false,
+          platform: 'Windows',
+          getHighEntropyValues: () => Promise.resolve({
+            architecture: 'x86',
+            bitness: '64',
+            brands: brands,
+            fullVersionList: brands.map((b) => ({ brand: b.brand, version: b.version + '.0.0.0' })),
+            mobile: false,
+            model: '',
+            platform: 'Windows',
+            platformVersion: '15.0.0',
+            uaFullVersion: major + '.0.0.0',
+          }),
+        }),
+        configurable: true,
+      });
+    }
+  } catch (e) {}
   // Chrome 对象存在性：headless 下可能缺失，补齐以免被识别。
   if (!window.chrome) { window.chrome = {}; }
   if (!window.chrome.runtime) { window.chrome.runtime = {}; }
@@ -365,6 +427,8 @@ def page_override_script() -> str:
         "cores": DEFAULT_CORES,
         "memory": DEFAULT_DEVICE_MEMORY,
         "locale": locale,
+        "ua": str((_config or {}).get("user_agent") or ""),
+        "major": _chrome_version_from_ua(),
     }
 
 
@@ -383,15 +447,19 @@ def apply_page_overrides(page) -> bool:
     except Exception:
         pass
     # Client Hints 与 UA 自洽：UA 声称 Windows/Chrome，这些头必须跟上。
-    for header, value in (
-        ("Sec-CH-UA-Platform", _CH_PLATFORM),
-        ("Sec-CH-UA-Platform-Version", _CH_PLATFORM_VERSION),
-        ("Accept-Language", DEFAULT_ACCEPT_LANGUAGE),
-    ):
-        try:
-            page.run_cdp("Network.setExtraHTTPHeaders", headers={header: value})
-        except Exception:
-            pass
+    # 必须一次性提交整组头：Network.setExtraHTTPHeaders 是"替换"语义，
+    # 逐个调用只会留下最后一个，等于前面几个头从未生效。
+    major = _chrome_version_from_ua()
+    headers = {
+        "Sec-CH-UA": _CH_UA_BRANDS % (major, major),
+        "Sec-CH-UA-Platform": _CH_PLATFORM,
+        "Sec-CH-UA-Platform-Version": _CH_PLATFORM_VERSION,
+        "Accept-Language": DEFAULT_ACCEPT_LANGUAGE,
+    }
+    try:
+        page.run_cdp("Network.setExtraHTTPHeaders", headers=headers)
+    except Exception:
+        pass
     return ok
 
 

@@ -57,9 +57,17 @@ start_xvfb() {
   if command -v Xvfb >/dev/null 2>&1; then
     export DISPLAY="${DISPLAY:-:99}"
     if ! pgrep -x Xvfb >/dev/null 2>&1; then
+      # Clear lock/socket left behind by an unclean shutdown; otherwise Xvfb
+      # exits immediately with "Server is already active for display 99" and
+      # every non-headless Chromium start fails.
+      rm -f "/tmp/.X${DISPLAY#:}-lock" "/tmp/.X11-unix/X${DISPLAY#:}" 2>/dev/null || true
       echo "[entrypoint] starting Xvfb on display ${DISPLAY}"
-      Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
-      xvfb_pid=$!
+      # setsid detaches Xvfb from this shell's process group. Without it the EXIT
+      # trap below fired the moment this script exec'd the Go runtime and killed
+      # Xvfb right after starting it — leaving a stale /tmp/.X11-unix/X99 socket
+      # and making every non-headless Chromium fail with "浏览器连接失败"
+      # (which in turn forced --headless=new and got us Cloudflare-blocked).
+      setsid Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 < /dev/null &
       sleep 1
     fi
   fi
@@ -87,6 +95,10 @@ start_inline_solver() {
   export TURNSTILE_LAZY="${TURNSTILE_LAZY:-1}"
   export TURNSTILE_IDLE_SEC="${TURNSTILE_IDLE_SEC:-180}"
   echo "[entrypoint] starting Python turnstile-solver on ${solver_host}:${solver_port} (thread=${solver_thread}, browser=${solver_browser}, lazy=${TURNSTILE_LAZY}, idle=${TURNSTILE_IDLE_SEC}s)"
+  # --proxy makes api_solver.py actually read proxies.txt. Without it the solver
+  # egresses from the container IP while the registration browser egresses from
+  # the configured proxy, and Cloudflare rejects the solved token because the
+  # challenge and its redemption come from different addresses.
   (
     cd /app/turnstile-solver
     exec python api_solver.py \
@@ -94,6 +106,7 @@ start_inline_solver() {
       --thread "${solver_thread}" \
       --host "${solver_host}" \
       --port "${solver_port}" \
+      --proxy \
       --debug
   ) > /app/turnstile-solver/logs/turnstile_solver.log 2>&1 &
   solver_pid=$!
@@ -217,7 +230,8 @@ run_migrations() {
 cleanup() {
   stop_pid "registration sidecar" "${reg_pid}"
   stop_pid "turnstile-solver" "${solver_pid}"
-  stop_pid "xvfb" "${xvfb_pid:-}"
+  # Xvfb is deliberately NOT stopped here: it is started with setsid and must
+  # survive this script exec'ing the Go runtime (see start_xvfb).
 }
 trap cleanup EXIT INT TERM
 

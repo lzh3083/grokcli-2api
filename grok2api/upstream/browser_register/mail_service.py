@@ -9,6 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from curl_cffi import requests
 from registration_flow import VerificationCodeUnavailable
+# http_get/http_post live in browser_runtime; the cancel helpers live in
+# cancel_utils. Both used to be fanned out by grok_register_ttk's bind_runtime(),
+# which was not carried over into grokcli-2api — leaving these names undefined at
+# runtime. Neither module imports mail_service, so these imports are cycle-free.
+from browser_runtime import http_get, http_post
+from cancel_utils import raise_if_cancelled, sleep_with_cancel
 
 DUCKMAIL_API_BASE = "https://api.duckmail.sbs"
 

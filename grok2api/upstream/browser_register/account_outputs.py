@@ -10,6 +10,14 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 
 from filelock import FileLock
+# Same missing-fan-out story as registration_browser / mail_service: these names
+# came from grok_register_ttk's bind_runtime() upstream and were undefined here.
+from browser_runtime import http_get, http_post
+from cancel_utils import (
+    RemoteTokenCompatibilityError,
+    RemoteTokenRequestError,
+    log_exception,
+)
 
 
 def _append_account_line_unlocked(path, email, password, sso):

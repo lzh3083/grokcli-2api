@@ -367,6 +367,17 @@ def normalize_proxy_config(
     raw = (proxy or XAI_PROXY or "").strip()
     if not raw:
         return None
+    # "direct"/"none"/"off"/"0" are sentinels meaning "no proxy", not host names.
+    # Without this guard the `f"http://{raw}"` shorthand below produced the
+    # literal URL http://direct, which leaked into the outbound pool and made
+    # every consumer fail with "Could not resolve proxy: direct" or
+    # "Temporary failure in name resolution".
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy
+    except Exception:  # pragma: no cover - proxy_pool is a sibling module
+        from proxy_pool import is_direct_proxy  # type: ignore
+    if is_direct_proxy(raw):
+        return None
     env_user = XAI_PROXY_USERNAME
     env_pass = XAI_PROXY_PASSWORD
     lower = raw.lower()

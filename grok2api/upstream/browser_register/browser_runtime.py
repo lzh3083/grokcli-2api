@@ -202,16 +202,55 @@ def apply_browser_proxy_option(options, proxy):
             pass
     if not hasattr(options, "set_argument"):
         raise AttributeError("当前 DrissionPage ChromiumOptions 不支持设置浏览器代理")
+    # Chromium's --proxy-server understands socks5://, socks4:// and http(s)://
+    # only. The curl-style socks5h:// / socks4a:// spellings (remote DNS) are
+    # rejected outright with ERR_NO_SUPPORTED_PROXIES, which renders a Chromium
+    # error page instead of the sign-up page — making every proxied registration
+    # look like "未找到「使用邮箱注册」按钮". Chromium's socks5 already resolves
+    # names through the proxy, so the rewrite is behaviour-safe.
+    chromium_proxy = str(proxy).strip()
+    lowered = chromium_proxy.lower()
+    if lowered.startswith("socks5h://"):
+        chromium_proxy = "socks5://" + chromium_proxy[len("socks5h://"):]
+    elif lowered.startswith("socks4a://"):
+        chromium_proxy = "socks4://" + chromium_proxy[len("socks4a://"):]
     try:
-        options.set_argument("--proxy-server=%s" % proxy)
+        options.set_argument("--proxy-server=%s" % chromium_proxy)
     except TypeError:
-        options.set_argument("--proxy-server", proxy)
+        options.set_argument("--proxy-server", chromium_proxy)
 
 
 def create_browser_options(browser_proxy="", extension_path=None):
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)
+    # Prefer a windowed Chromium on the Xvfb display. x.ai's Cloudflare returns
+    # "Sorry, you have been blocked" for --headless=new from every IP class tried
+    # (Oracle VPS, Cloudflare WARP, US Comcast residential, Brazil residential),
+    # i.e. the block is headless-fingerprint driven, not IP driven. Fall back to
+    # headless only when no X display exists, because a windowed Chromium cannot
+    # be reached over CDP without one. A root-owned Chromium always needs
+    # --no-sandbox. browser_path comes from
+    # browser_register_adapter._detect_chromium_path().
+    display = str(os.environ.get("DISPLAY") or "").strip()
+    force_headless = str((_config or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
+    if force_headless or not display:
+        options.headless(True)
+    options.set_argument("--no-sandbox")
+    options.set_argument("--disable-dev-shm-usage")
+    # us_consistency rewrites navigator.platform to Win32 and sends Windows
+    # Sec-CH-UA-* headers, so the User-Agent must claim Windows too. Chromium's
+    # own UA says "Linux", which contradicts those overrides and is enough for
+    # Cloudflare to reject the Turnstile token.
+    user_agent = str((_config or {}).get("user_agent") or "").strip()
+    if user_agent:
+        try:
+            options.set_argument("--user-agent=%s" % user_agent)
+        except TypeError:
+            options.set_argument("--user-agent", user_agent)
+    browser_path = str((_config or {}).get("browser_path") or "").strip()
+    if browser_path:
+        options.set_browser_path(browser_path)
     apply_browser_proxy_option(options, browser_proxy)
     effective_extension = _resolve_extension_path(extension_path)
     if effective_extension:

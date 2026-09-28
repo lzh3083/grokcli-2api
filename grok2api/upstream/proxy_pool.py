@@ -172,6 +172,42 @@ def _hostport_userpass(raw: str) -> str | None:
     return f"{scheme}://{auth}@{host}:{port}"
 
 
+# Values the UI/API use to say "explicitly no proxy". They are sentinels, not
+# host names: without this list, normalize_proxy_config's `f"http://{raw}"`
+# shorthand turned "direct" into the literal proxy URL http://direct, which then
+# entered the outbound pool and made curl/httpx fail with
+# "Could not resolve proxy: direct" / "Temporary failure in name resolution".
+DIRECT_PROXY_SENTINELS = frozenset(
+    {"direct", "none", "off", "no", "false", "nil", "null", "0"}
+)
+
+_PROXY_SCHEME_PREFIXES = (
+    "http://",
+    "https://",
+    "socks5://",
+    "socks5h://",
+    "socks4://",
+    "socks4a://",
+)
+
+
+def is_direct_proxy(value: str | None) -> bool:
+    """True when ``value`` explicitly means "no proxy".
+
+    Accepts the bare sentinel ("direct") as well as a scheme-wrapped spelling
+    ("http://direct") so already-persisted bad config is also recognised.
+    An empty value is *not* direct: empty means "unset, use the default".
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    for prefix in _PROXY_SCHEME_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.rstrip("/") in DIRECT_PROXY_SENTINELS
+
+
 def canonicalize_proxy_line(
     raw: str,
     *,

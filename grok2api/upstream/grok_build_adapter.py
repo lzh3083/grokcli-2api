@@ -1559,6 +1559,17 @@ def _proxy_pool(
       2) env / outbound_proxy_config pool
       3) auto-discovered peer proxy (privoxy etc.)
     """
+    # An explicit "direct" sentinel means the caller wants no proxy at all, so
+    # stop here instead of falling through to the env pool or an auto-discovered
+    # peer proxy. Without this, "direct" was normalised into http://direct and
+    # the browser was launched with --proxy-server=http://direct, which Chromium
+    # rejects with ERR_NO_SUPPORTED_PROXIES (or hangs on DNS).
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy
+    except Exception:  # pragma: no cover - sibling module
+        from proxy_pool import is_direct_proxy  # type: ignore
+    if is_direct_proxy(proxy_text):
+        return []
     try:
         from grok2api.upstream.proxy_pool import (
             parse_proxy_pool,
@@ -1635,6 +1646,7 @@ def _prepare_registration_session(
     batch_index: int | None = None,
     batch_total: int | None = None,
     start_delay: float = 0.0,
+    session_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create mailbox + session record. Does NOT start the registration worker."""
     if start_delay > 0:
@@ -1678,6 +1690,16 @@ def _prepare_registration_session(
         # Keep receiver process-local only (not mirrored to Redis).
         "_receiver": receiver,
     }
+    # Browser-engine preferences (enable_nsfw / us_consistency_* / sso_risk_* /
+    # proxy_pool_preflight_enabled) are read from the *session dict* by
+    # browser_register_adapter.run_browser_registration — they are NOT
+    # start_registration kwargs. Passing them as kwargs raised
+    # "start_registration() got an unexpected keyword argument 'enable_nsfw'"
+    # and broke every registration start.
+    if session_overrides:
+        for _ov_key, _ov_val in session_overrides.items():
+            if _ov_val is not None:
+                sess[_ov_key] = _ov_val
     with _lock:
         _sessions[sid] = sess
         if batch_id and batch_id in _batches:
@@ -1702,6 +1724,7 @@ def _start_one_registration(
     batch_index: int | None = None,
     batch_total: int | None = None,
     start_delay: float = 0.0,
+    session_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one session and spawn its worker thread (single-job path)."""
     prepared = _prepare_registration_session(
@@ -1717,6 +1740,7 @@ def _start_one_registration(
         batch_index=batch_index,
         batch_total=batch_total,
         start_delay=start_delay,
+        session_overrides=session_overrides,
     )
     if not prepared.get("ok"):
         return prepared
@@ -1781,6 +1805,7 @@ def start_registration(
     concurrency: int | None = None,
     stagger_ms: int | None = None,
     probe_delay_sec: float | int | None = None,
+    session_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start one or many registration sessions (multi-thread).
 
@@ -1945,6 +1970,7 @@ def start_registration(
             domain=domain,
             expiry_ms=expiry_ms,
             mail_provider=mail_prov,
+            session_overrides=session_overrides,
         )
 
     batch_id = f"batch_{uuid.uuid4().hex[:12]}"
@@ -2029,6 +2055,7 @@ def start_registration(
         domain=domain,
         expiry_ms=expiry_ms,
         mail_provider=mail_prov,
+        session_overrides=session_overrides,
     )
     if not started.get("ok"):
         return started
@@ -2076,6 +2103,7 @@ def _spawn_batch_runner(
     domain: str | None,
     expiry_ms: int | None,
     mail_provider: str | None = None,
+    session_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start the ThreadPool spawner for a batch (also used by resume/reclaim)."""
     bid = str(batch_id or "").strip()
@@ -2370,6 +2398,7 @@ def _spawn_batch_runner(
                 batch_index=i,
                 batch_total=int((_load_reg_batch(bid) or {}).get("count") or remaining),
                 start_delay=delay,
+                session_overrides=session_overrides,
             )
             if not prepared.get("ok"):
                 return prepared

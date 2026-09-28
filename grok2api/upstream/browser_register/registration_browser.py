@@ -11,6 +11,25 @@ from DrissionPage import Chromium
 from DrissionPage.errors import ContextLostError, JavaScriptError, PageDisconnectedError
 from curl_cffi import requests
 from proxy_pool import ProxyTransportError, safe_proxy_error_text
+# browser_runtime / mail_service / app_config own helpers this module calls.
+# These imports (and the three cancel helpers below) were lost when the
+# grok-register engine was folded into grokcli-2api: upstream, the grok_register_ttk
+# module published them through bind_runtime(). Without them every browser start
+# died with e.g.
+#   "浏览器启动失败，已重试4次: name 'prepare_browser_proxy' is not defined"
+#   "浏览器启动失败，已重试4次: name 'create_browser_options' is not defined"
+# No module here imports registration_browser, so these imports are cycle-free.
+from browser_runtime import (
+    create_browser_options,
+    get_configured_proxy,
+    get_proxies,
+    is_proxy_connection_error,
+    page_has_proxy_error,
+    prepare_browser_proxy,
+)
+from mail_service import get_email_and_token, get_oai_code, get_user_agent
+from app_config import config
+from cancel_utils import AccountRetryNeeded, raise_if_cancelled, sleep_with_cancel
 
 browser = None
 page = None
@@ -1401,6 +1420,132 @@ def build_profile():
     password = "N" + secrets.token_hex(4) + "!a7#" + secrets.token_urlsafe(6)
     return given_name, family_name, password
 
+
+# x.ai's sign-up page renders Turnstile through React, and its submit guard reads
+# a React state (called F in the bundle) rather than the
+# input[name="cf-turnstile-response"] value:
+#
+#     eL = async e => {
+#         if (H || eo || ex || eS) return;
+#         if (!F) return (0,b.track)("account_signup_error",
+#                      {error_type:"turnstile_failed", step:"credentials"}), eA(), !1;
+#         ...
+#     }
+#
+# That state is written by the Turnstile component's onToken callback:
+#
+#     ["Turnstile", 0, ({onToken: e, ...}) => {
+#         let _ = useContext(a.TurnstileCtx), E = useRef(null);
+#         useEffect(() => {
+#             if (void 0 === _ || null === E.current) return;
+#             _.turnstile.render(E.current, {
+#                 sitekey: _.sitekey, size: "flexible",
+#                 callback: t => { m(null), e(t) },   // <- e is onToken
+#                 "error-callback": ...
+#             }), () => { _.turnstile.remove(t) }
+#         }, [...]);
+#     }]
+#
+# Writing the solver token into the hidden input alone is therefore not enough:
+# the click is accepted, the button is enabled, and the page still refuses to
+# POST, emitting only the account_signup_error analytics event above.
+#
+# onToken is a component prop, so it hangs off the React fiber's memoizedProps.
+# Walking up from the widget container via __reactFiber$ lets us call it
+# directly, which sidesteps Cloudflare's closed shadow DOM entirely (the widget
+# is not reachable as ordinary DOM, so there is nothing to fill in).
+_REACT_ONTOKEN_JS = r"""
+try {
+  const token = %s;
+  function fiberKey(el) {
+    if (!el) return null;
+    // React attaches __reactFiber$<random> as a NON-enumerable own property,
+    // so Object.keys() never sees it — getOwnPropertyNames() is required.
+    for (const name of Object.getOwnPropertyNames(el)) {
+      if (name.indexOf('__reactFiber$') === 0) return name;
+      if (name.indexOf('__reactInternalInstance$') === 0) return name;
+    }
+    return null;
+  }
+  const input = document.querySelector('input[name="cf-turnstile-response"]');
+  const roots = [];
+  if (input) {
+    roots.push(input);
+    let parent = input.parentElement;
+    for (let i = 0; i < 5 && parent; i++) { roots.push(parent); parent = parent.parentElement; }
+    if (input.parentElement) {
+      for (const child of input.parentElement.children) roots.push(child);
+    }
+  }
+  // Fallback: scan a bounded set of elements that carry a fiber, in case the
+  // widget container is not an ancestor/sibling of the hidden input.
+  let scanned = 0;
+  for (const el of document.querySelectorAll('div, span, form, button, section')) {
+    if (fiberKey(el)) { roots.push(el); scanned++; }
+    if (scanned >= 40) break;
+  }
+  const traced = [];
+  for (const el of roots) {
+    const key = fiberKey(el);
+    if (!key) continue;
+    let fiber = el[key];
+    let depth = 0;
+    while (fiber && depth < 100) {
+      const props = fiber.memoizedProps;
+      if (props && typeof props.onToken === 'function') {
+        try { props.onToken(token); return 'called-onToken@d' + depth; }
+        catch (e) { return 'onToken-threw:' + String(e).slice(0, 80); }
+      }
+      if (props && typeof props.onSuccess === 'function') {
+        try { props.onSuccess(token); return 'called-onSuccess@d' + depth; }
+        catch (e) {}
+      }
+      fiber = fiber.return;
+      depth += 1;
+    }
+    traced.push('d' + depth);
+    if (traced.length >= 8) break;
+  }
+  return 'not-found:roots=' + roots.length + ',traced=' + traced.join('|');
+} catch (e) { return 'fatal:' + String(e).slice(0, 100); }
+"""
+
+
+def inject_turnstile_token_into_react(token, log_callback=None):
+    """Publish a solved Turnstile token to x.ai's React state.
+
+    Returns the JS probe result string (useful for logs and tests).
+    """
+    if page is None or not token:
+        return ""
+    try:
+        result = page.run_js(_REACT_ONTOKEN_JS % json.dumps(str(token)))
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[*] Turnstile token 注入 React 失败: {type(exc).__name__}: {str(exc)[:140]}")
+        return ""
+    if log_callback:
+        log_callback(f"[*] Turnstile token 注入 React 结果: {result}")
+    return str(result or "")
+
+
+def _publish_solver_token_to_page_state(log_callback=None):
+    """Read the solver token off the page and hand it to the React component."""
+    try:
+        token = page.run_js(
+            'try{var i=document.querySelector(\'input[name="cf-turnstile-response"]\');'
+            'return i?String(i.value||""):"";}catch(e){return "";}'
+        )
+    except Exception:
+        token = ""
+    token = str(token or "")
+    if log_callback:
+        log_callback(f"[*] 提交前读取 solver token 长度={len(token)}")
+    if not token:
+        return ""
+    return inject_turnstile_token_into_react(token, log_callback)
+
+
 def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None):
     given_name, family_name, password = build_profile()
     deadline = time.time() + timeout
@@ -1535,6 +1680,10 @@ return 'ready-to-submit';
 
         if submit_state == "ready-to-submit":
             _mark_registration_stage("profile_submit")
+            # The solver has already put its token in the hidden input; publish
+            # it to React state as well, otherwise the submit guard sees no
+            # token and silently refuses to POST (see _REACT_ONTOKEN_JS).
+            _publish_solver_token_to_page_state(log_callback)
             submit_state = page.run_js(
                 r"""
 function isVisible(node) {
