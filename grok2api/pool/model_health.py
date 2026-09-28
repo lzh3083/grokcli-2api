@@ -313,6 +313,24 @@ _ACCOUNT_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Chat-endpoint authorisation refusals. Distinct from _ACCOUNT_BLOCK_RE above:
+# the account itself is intact (token valid, no ban, other endpoints fine), but
+# xAI refuses /chat/completions for it. Observed on freshly registered accounts:
+#   {"code":"permission-denied",
+#    "error":"Access to the chat endpoint is denied. Please ensure you're using
+#             the correct credentials. ..."}
+# Such an account can never answer a request, so it must not linger in the pool
+# looking "available" — it is dropped outright rather than cooled.
+_CHAT_ACCESS_DENIED_RE = re.compile(
+    r"("
+    r"permission[_-]?denied|"
+    r"permission\s+denied|"
+    r"chat\s+endpoint\s+is\s+denied|"
+    r"access\s+to\s+the\s+chat\s+endpoint"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def is_temporary_usage_error(
     error: str | None, status_code: int | None = None
@@ -364,6 +382,72 @@ def is_account_block_error(
     return False
 
 
+def is_chat_access_denied_error(
+    error: str | None, status_code: int | None = None
+) -> bool:
+    """True when xAI refuses chat completions for this account.
+
+    This is terminal, not transient: the credential is valid and the account is
+    not banned, but it has no chat entitlement. Cooling it down would only let
+    it come back and fail again on the next wave, so callers should drop it.
+    """
+    text = (error or "").strip()
+    if not text:
+        return False
+    return bool(_CHAT_ACCESS_DENIED_RE.search(text))
+
+
+def discard_chat_denied_account(
+    account_id: str | None,
+    *,
+    error: str = "",
+    status_code: int | None = None,
+    source: str = "model_health",
+) -> dict[str, Any] | None:
+    """Hard-delete an account xAI refuses chat completions for.
+
+    Deletes credentials + pool row (``accounts.remove_account`` also cleans the
+    per-account side state) so the account cannot linger as a fake "available"
+    entry. Returns a summary dict describing what happened.
+    """
+    if not account_id:
+        return None
+    reason = f"聊天端点无权限 (HTTP {status_code}): {(error or '')[:120]}"
+    removed = False
+    try:
+        from grok2api.pool.accounts import remove_account
+
+        removed = bool(remove_account(account_id))
+    except Exception:
+        removed = False
+    if not removed:
+        # Removal can legitimately fail if another worker already dropped it;
+        # fall back to disabling so it still leaves rotation.
+        try:
+            import grok2api.pool.account_pool as account_pool
+
+            account_pool.set_account_enabled(account_id, False)
+            account_pool.patch_account_pool_meta(
+                account_id,
+                {
+                    "pool_status": "disabled",
+                    "disabled_reason": reason,
+                    "disabled_source": source,
+                    "last_error": reason,
+                },
+            )
+        except Exception:
+            pass
+    return {
+        "id": account_id,
+        "removed": removed,
+        "disabled": not removed,
+        "reason": reason,
+        "pool_status": "removed" if removed else "disabled",
+        "source": source,
+    }
+
+
 def handle_upstream_error_for_model(
     account_id: str | None,
     *,
@@ -378,7 +462,19 @@ def handle_upstream_error_for_model(
     Temporary free-usage / 429s only get a short model soft-block TTL so
     rotation skips the hot account briefly without killing the pool.
     """
-    if not account_id or not _live_auto_disable():
+    if not account_id:
+        return None
+
+    # Checked before the auto-disable switch on purpose: this is a definitive
+    # authorisation refusal, not a health heuristic, and the operator asked for
+    # such accounts to never be retained. Honouring "auto disable off" here
+    # would silently refill the pool with accounts that cannot answer.
+    if is_chat_access_denied_error(error, status_code):
+        return discard_chat_denied_account(
+            account_id, error=error, status_code=status_code, source="upstream"
+        )
+
+    if not _live_auto_disable():
         return None
 
     import grok2api.pool.account_pool as account_pool
@@ -578,8 +674,31 @@ def probe_model_for_creds(
         """Mutate pool only when scanned and error class matches a policy."""
         if not auto_disable or not creds.auth_key:
             return
-        # Fresh registrations: record last_probe only — never cool/disable.
-        if str(source or "").lower() in {"register", "import", "registration", "sso_import"}:
+        # A chat-endpoint authorisation refusal is terminal: the credential is
+        # valid but xAI will never serve this account. Drop it and stop — there
+        # is no state left to cool, and letting the streak/cooldown path below
+        # run would recreate pool meta for an account that no longer exists.
+        # This is also the one error class that applies to a freshly registered
+        # account, since the post-import probe is exactly where it surfaces.
+        if is_chat_access_denied_error(err_text, status_code):
+            try:
+                handle_upstream_error_for_model(
+                    creds.auth_key,
+                    model=model,
+                    error=err_text,
+                    status_code=status_code,
+                )
+            except Exception:
+                pass
+            return
+        # Fresh registrations: record last_probe only — never cool/disable, so a
+        # brand-new account is not kicked out by a first-ping hiccup.
+        if str(source or "").lower() in {
+            "register",
+            "import",
+            "registration",
+            "sso_import",
+        }:
             return
         try:
             import grok2api.pool.account_pool as account_pool

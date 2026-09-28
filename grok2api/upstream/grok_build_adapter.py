@@ -238,6 +238,51 @@ def _now() -> float:
     return time.time()
 
 
+def _call_with_session_heartbeat(
+    func: Any,
+    *args: Any,
+    update: Any = None,
+    heartbeat_status: str = "probing",
+    heartbeat_message: str = "处理中",
+    interval: float = 10.0,
+    **kwargs: Any,
+) -> Any:
+    """Run a long blocking call while keeping the registration session fresh.
+
+    The registration watchdog reclaims sessions whose ``updated_at`` has gone
+    stale (``GROK2API_REG_STALE_SEC``, 120s by default) and a reclaimed session
+    gets re-run — which would duplicate the registration. A 降智 probe can block
+    for well over 100 seconds, so it has to heartbeat exactly like the settle
+    wait already does.
+    """
+    outcome: dict[str, Any] = {}
+    failure: dict[str, BaseException] = {}
+
+    def _target() -> None:
+        try:
+            outcome["value"] = func(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller
+            failure["exc"] = exc
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    started = time.time()
+    while True:
+        worker.join(timeout=interval)
+        if not worker.is_alive():
+            break
+        if update is not None:
+            # update() raises _RegCancelled when the user stops the job; that
+            # must propagate instead of being swallowed as a heartbeat error.
+            update(
+                heartbeat_status,
+                f"{heartbeat_message}（已 {int(time.time() - started)}s）",
+            )
+    if failure:
+        raise failure["exc"]
+    return outcome.get("value")
+
+
 def _persist_registration_sso(
     *,
     sid: str,
@@ -3949,6 +3994,8 @@ def _run_registration(
                 imported_accounts=imported_accounts,
                 probe_delay_sec=delay,
             )
+            discarded_ids: list[str] = []
+            degraded_ids: list[str] = []
             try:
                 import grok2api.pool.model_health as model_health
 
@@ -3975,16 +4022,40 @@ def _run_registration(
                             or detail.get("elapsed_ms")
                             or detail.get("duration_ms")
                         )
-                        probe_summaries.append(
-                            {
-                                "account_id": aid,
-                                "ok": bool(pr.get("ok") if isinstance(pr, dict) else False),
-                                "model": detail.get("model")
-                                or (pr.get("model") if isinstance(pr, dict) else None),
-                                "error": (str(err_text)[:180] if err_text else None),
-                                "latency_ms": latency,
-                            }
+                        ok_flag = bool(pr.get("ok") if isinstance(pr, dict) else False)
+                        status_code = detail.get("status_code") or (
+                            pr.get("status_code") if isinstance(pr, dict) else None
                         )
+                        summary = {
+                            "account_id": aid,
+                            "ok": ok_flag,
+                            "model": detail.get("model")
+                            or (pr.get("model") if isinstance(pr, dict) else None),
+                            "error": (str(err_text)[:180] if err_text else None),
+                            "latency_ms": latency,
+                        }
+                        # A chat-endpoint authorisation refusal is terminal: the
+                        # credential is valid but xAI will never serve this
+                        # account. Delete it rather than leave a pool entry that
+                        # looks available and fails every request. This probe runs
+                        # with auto_disable=False, so the deletion is done here
+                        # explicitly instead of relying on model_health's policy.
+                        if not ok_flag and model_health.is_chat_access_denied_error(
+                            str(err_text or ""), status_code
+                        ):
+                            model_health.discard_chat_denied_account(
+                                aid,
+                                error=str(err_text or ""),
+                                status_code=status_code,
+                                source="register",
+                            )
+                            summary["discarded"] = "chat-access-denied"
+                            discarded_ids.append(aid)
+                            print(
+                                f"[grok-build-auth] 账号 {aid} 聊天端点无权限，已删除（不计入可用账号）",
+                                flush=True,
+                            )
+                        probe_summaries.append(summary)
                     except Exception as pe:  # noqa: BLE001
                         probe_summaries.append(
                             {
@@ -4001,12 +4072,137 @@ def _run_registration(
                         "error": f"probe module error: {pe}"[:180],
                     }
                 )
+
+            # ---- 降智检测（Quality Probe）----
+            # xAI 会对部分账号静默降级：接口照常返回 200，但模型不再逐步推理。
+            # 这类账号在注册环节查不出异常，只有真正发一次需要推理的请求、
+            # 看 usage.completion_tokens_details.reasoning_tokens 才能暴露。
+            quality_summaries: list[dict[str, Any]] = []
+            quality_summary_counts: dict[str, int] = {}
+            try:
+                try:
+                    try:
+                        import app_config as _quality_config
+                    except Exception:
+                        from grok2api.upstream.browser_register import (
+                            app_config as _quality_config,
+                        )
+
+                    quality_cfg = dict(getattr(_quality_config, "config", {}) or {})
+                except Exception:
+                    quality_cfg = {}
+                if bool(quality_cfg.get("quality_auto_probe", False)):
+                    import grok2api.pool.account_pool as _quality_pool
+                    import grok2api.pool.model_health as _quality_health
+                    from grok2api.pool import quality_probe as _qp
+
+                    soft_threshold = int(
+                        quality_cfg.get("quality_soft_threshold")
+                        or _qp.SOFT_REASONING_TOKENS
+                    )
+                    # 单次读写超时 vs 整个请求的墙钟预算：推理量波动极大
+                    # （实测有账号 reasoning_tokens 近 1 万、单次 110 秒以上），
+                    # 所以预算给得宽松，只用来兜住"流一直不停"的病态情况。
+                    quality_timeout = float(
+                        os.environ.get("GROK2API_QUALITY_PROBE_TIMEOUT", "60") or 60
+                    )
+                    quality_deadline = float(
+                        os.environ.get("GROK2API_QUALITY_PROBE_DEADLINE", "300") or 300
+                    )
+                    targets = [a for a in imported_ids if a not in discarded_ids]
+                    if targets:
+                        update(
+                            "probing",
+                            f"imported {len(imported_ids)} account(s); 降智检测 "
+                            f"{len(targets)} 个新增账号（reasoning_tokens < "
+                            f"{soft_threshold} 视为可疑）[{ADAPTER_BUILD}]",
+                            imported_account_ids=imported_ids,
+                            imported_accounts=imported_accounts,
+                        )
+                    for aid in targets:
+                        try:
+                            creds = _quality_pool.load_credentials_by_id(aid)
+                        except Exception:
+                            creds = None
+                        if creds is None:
+                            quality_summaries.append(
+                                {"account_id": aid, "verdict": "error", "error": "凭据缺失"}
+                            )
+                            continue
+                        # 探测本身可阻塞 100 秒以上，必须带心跳，否则会话会被
+                        # 注册 watchdog 当成孤儿回收并重跑（重复注册）。
+                        qres = _call_with_session_heartbeat(
+                            _qp.probe_credentials,
+                            creds,
+                            update=update,
+                            heartbeat_status="probing",
+                            heartbeat_message=(
+                                f"降智检测 {getattr(creds, 'email', None) or aid} 推理中"
+                            ),
+                            interval=10.0,
+                            soft_threshold=soft_threshold,
+                            timeout=quality_timeout,
+                            deadline_sec=quality_deadline,
+                        )
+                        qres.setdefault("account_id", aid)
+                        verdict = str(qres.get("verdict") or "error")
+                        if verdict == _qp.VERDICT_HARD:
+                            # 保留记录但暂停轮询，便于人工复查后恢复。
+                            try:
+                                _quality_pool.set_account_enabled(aid, False)
+                                _quality_pool.patch_account_pool_meta(
+                                    aid,
+                                    {
+                                        "pool_status": "disabled",
+                                        "disabled_reason": (
+                                            "降智：reasoning_tokens=0，模型未做推理"
+                                        ),
+                                        "disabled_source": "quality_probe",
+                                        "last_error": "quality_probe: reasoning_tokens=0",
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            degraded_ids.append(aid)
+                            qres["action"] = "disabled"
+                        elif verdict == _qp.VERDICT_RISK and aid not in discarded_ids:
+                            # ping 探测漏判、降智探测才撞上的无权限账号。
+                            qerr = str(qres.get("error") or "")
+                            if _quality_health.is_chat_access_denied_error(
+                                qerr, qres.get("status")
+                            ):
+                                _quality_health.discard_chat_denied_account(
+                                    aid,
+                                    error=qerr,
+                                    status_code=qres.get("status"),
+                                    source="quality_probe",
+                                )
+                                discarded_ids.append(aid)
+                                qres["action"] = "discarded"
+                        quality_summaries.append(qres)
+                        print(
+                            f"[grok-build-auth] 降智检测 {_qp.format_line(qres)}",
+                            flush=True,
+                        )
+                    quality_summary_counts = _qp.summarize(quality_summaries)
+            except _RegCancelled:
+                # The heartbeat calls update(), which raises this when the user
+                # stops the job. Swallowing it here would make "stop" a no-op.
+                raise
+            except Exception as qexc:  # noqa: BLE001
+                print(f"[grok-build-auth] WARN: 降智检测失败: {qexc}", flush=True)
         # Ensure newly registered accounts stay enabled + not cooling even if a
         # concurrent background health wave cooled them during import.
+        # Accounts deleted for a chat-endpoint denial, or disabled because they
+        # came back 降智, are deliberately excluded: re-enabling them here would
+        # undo that decision and resurrect a pool entry that cannot serve.
+        skipped_ids = set(discarded_ids) | set(degraded_ids)
         try:
             import grok2api.pool.account_pool as account_pool
             from grok2api.admin.settings_store import get_account_pool_meta, patch_account_pool_meta
             for aid in imported_ids:
+                if aid in skipped_ids:
+                    continue
                 try:
                     account_pool.clear_account_cooldown(aid)
                 except Exception:
@@ -4033,15 +4229,48 @@ def _run_registration(
             "count": len(probe_summaries),
             "ok": sum(1 for p in probe_summaries if p.get("ok")),
             "fail": sum(1 for p in probe_summaries if not p.get("ok")),
+            "discarded": list(discarded_ids),
+            "degraded": list(degraded_ids),
             "results": probe_summaries,
         }
+        if quality_summaries:
+            sess["probe"]["quality"] = {
+                "summary": quality_summary_counts,
+                "results": quality_summaries,
+            }
         ok_n = int(sess["probe"]["ok"])
         fail_n = int(sess["probe"]["fail"])
+        # 被删除（聊天端点无权限）的账号不再存在；被禁用（降智）的账号仍然保留，
+        # 只是暂停轮询。所以只有"一个都没留下"才算这次注册失败。
+        retained_ids = [a for a in imported_ids if a not in set(discarded_ids)]
+        if imported_ids and not retained_ids:
+            # Every account this run produced was deleted, so the registration
+            # did not yield anything the pool can serve. Reporting "imported"
+            # here would be a lie the operator cannot see through.
+            update(
+                "error",
+                f"注册未产出可用账号：{len(imported_ids)} 个账号全部被删除"
+                f"（聊天端点无权限 {len(discarded_ids)}）；"
+                f"probe ok={ok_n} fail={fail_n} [{ADAPTER_BUILD}]",
+                imported_account_ids=imported_ids,
+                imported_accounts=imported_accounts,
+                probe=sess.get("probe"),
+                error="no usable account after probe",
+            )
+            return
+        active_ids = [a for a in retained_ids if a not in set(degraded_ids)]
+        extra = ""
+        if discarded_ids or degraded_ids:
+            extra = (
+                f"; active={len(active_ids)}"
+                f" degraded={len(degraded_ids)}"
+                f" discarded={len(discarded_ids)}"
+            )
         update(
             "imported",
             f"imported via sso_to_auth_json "
             f"({len(imported_ids) or len(imported_rows)} account(s)); "
-            f"probe ok={ok_n} fail={fail_n} "
+            f"probe ok={ok_n} fail={fail_n}{extra} "
             f"[{ADAPTER_BUILD}]",
             imported_account_ids=imported_ids,
             imported_accounts=imported_accounts,

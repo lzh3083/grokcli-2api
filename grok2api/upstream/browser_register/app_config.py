@@ -153,8 +153,11 @@ DEFAULT_CONFIG = {
     "novproxy_minutes": 120,
     "novproxy_num": 5,
     # ---- 降智测试（Quality Probe）----
-    # 账号注册后是否自动做一次降智检测并写入记录。
-    "quality_auto_probe": False,
+    # 账号注册后是否自动做一次降智检测并写入记录。默认开启：xAI 会对部分账号
+    # 静默降级（接口照常 200 但不再逐步推理），只有真发一次需要推理的请求、
+    # 看 usage.completion_tokens_details.reasoning_tokens 才能发现。检测同步
+    # 跑在注册流程内，每个账号约 6~15 秒。判为降智的账号保留记录但暂停轮询。
+    "quality_auto_probe": True,
     # 降智测试可疑阈值（低于此推理 token 数量视为可疑）。
     "quality_soft_threshold": 50,
     # 注册会话内是否实测 Grok Imagine 生图能力。默认关闭：这个探测要真的
