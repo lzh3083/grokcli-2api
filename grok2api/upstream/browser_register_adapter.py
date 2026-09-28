@@ -114,7 +114,18 @@ def run_browser_registration(
         cfg["browser_path"] = cfg.get("browser_path") or ""
 
     # 2. Configure proxy mode
+    # An explicit per-job proxy always wins. When the caller passes nothing we
+    # fall back to the operator-configured default line (config.json
+    # proxy_mode="single" + proxy) instead of silently going direct, so the
+    # registration egress can be switched from the admin console without a code
+    # change. Unset config still means direct, which is the old behaviour.
     active_proxy = str(proxy or sess.get("proxy") or "").strip()
+    if not active_proxy:
+        try:
+            if str(cfg.get("proxy_mode") or "").strip().lower() == "single":
+                active_proxy = str(cfg.get("proxy") or "").strip()
+        except Exception:
+            active_proxy = ""
     is_direct = not active_proxy or active_proxy.lower() in ("direct", "none", "off", "0")
     if is_direct:
         cfg["proxy_mode"] = "direct"
