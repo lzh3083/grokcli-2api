@@ -2,14 +2,14 @@
 
 把 **Grok OIDC 登录态** 转成 **OpenAI / Anthropic 兼容 API**，并附带 Web 管理台：多 API Key、多账号轮询、设备码 / SSO / JSON 导入导出、协议注册。
 
-**当前版本：v2.0.4** · 容器内热更新 · API Key 列表修复 · 注册资源/日志优化 · empty-output 治理 · Go 主进程
+**当前版本：v2.0.5** · Camoufox反爬绕过 · React Fiber注入 · 容器内热更新 · API Key · Go 主进程
 
 [![GHCR](https://img.shields.io/badge/ghcr.io-hm2899%2Fgrokcli--2api-blue)](https://github.com/users/HM2899/packages/container/package/grokcli-2api)
 [![Release](https://img.shields.io/github/v/release/HM2899/grokcli-2api?display_name=tag)](https://github.com/HM2899/grokcli-2api/releases)
 
 | 镜像（全小写） | 说明 |
 |----------------|------|
-| `ghcr.io/hm2899/grokcli-2api:2.0.4` | 当前版本 |
+| `ghcr.io/hm2899/grokcli-2api:2.0.5` | 当前版本 |
 | `ghcr.io/hm2899/grokcli-2api:latest` | 最近 `v*` tag |
 | `ghcr.io/hm2899/grokcli-2api:edge` | `main` 最新 |
 
@@ -72,7 +72,17 @@
 
 ---
 
-## 本版本重点（v2.0.4）
+## 本版本重点（v2.0.5）
+
+| 能力 | 行为 |
+|------|------|
+| **Camoufox 反反爬引擎集成** | 解决 Cloudflare Bot Management 对 Chromium 的阻断，以 Juggler 协议模拟真实指纹，保证 accounts.x.ai 注册邮件 2 秒秒收 |
+| **React Fiber 穿透注入** | 通过 `wrappedJSObject` BFS 遍历 React 内部 Fiber 树，将 Turnstile 解出的 token 直接喂给 `onToken` state 触发提交守卫 |
+| **内联 Solver 深度联动** | 优先调用本地 Camoufox YesCaptcha Solver，解题成功后自动完成 Bridge 回灌与表单提交，全流程自动化无感入库 |
+
+---
+
+## 历史版本（v2.0.4）
 
 | 能力 | 行为 |
 |------|------|

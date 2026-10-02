@@ -1,0 +1,44 @@
+# Changelog
+
+All notable changes to `grokcli-2api` will be documented in this file.
+
+---
+
+## [v2.0.5] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **集成 Camoufox 反反爬浏览器引擎彻底旁路 Cloudflare Bot Management**：
+  - 针对 x.ai 从 2026 年 9 月下旬起在 `accounts.x.ai` 实施的 Cloudflare Bot Management（JSD）机制，彻底解决 Chromium（CDP 协议 / `AutomationControlled`）被识别导致邮箱注册提交被拦截（提示 `Email sign-up isn't available right now. Sign up another way.`）及验证码邮件被静默丢弃的问题。
+  - 采用加固版 Firefox（Camoufox，基于 Juggler 协议），自带真实 Windows/Linux 指纹、WebGL、时区与平台伪造，验证码邮件 2～3 秒秒收。
+  - 新增 `camoufox_compat.py` 运行时适配器，向下兼容 DrissionPage 核心 API（`page.run_js`、`page.ele`、`page.wait.doc_loaded()` 等），支持无缝切换浏览器引擎。
+
+- **修复 React Fiber 深度穿透与 Turnstile Token 注入**：
+  - 针对 Next.js RSC / React 18+ 注册提交守卫强制要求 `onToken` 写入 React state 的限制，在 Firefox (Camoufox) 沙箱环境下，解决普通 DOM 对象无法枚举非公开 expando 属性的问题。
+  - 在 `registration_browser.py` 中引入 `wrappedJSObject` 穿透，实现从表单/根节点出发的有界 BFS 遍历，精准捕获持有 `onToken` 的 Fiber 节点并自动注入（`called-onToken@6`）。
+  - 在 `camoufox_compat.py` 的全局垫片 `_TURNSTILE_SHIM_JS` 中增加回调录制与实时 Bridge 桥接，保证本地 Solver 与 React 内部组件的双向连通。
+
+- **打码流程优化与本地内联 Solver 深度联动**：
+  - 优化 `_wait_for_turnstile` 流程，在 Camoufox 引擎下优先调用容器内集成的本地 Camoufox YesCaptcha Solver（`http://127.0.0.1:5072`），跳过无意义的被动等待与 CSP 拦截的页内注入。
+  - 实现从邮箱创建、验证码秒提、本地 Solver 解题、React Fiber 状态注入、资料表单提交、SSO 提取到风控检查与 NSFW 开通的 100% 全自动毫秒级闭环。
+
+### 🛠️ 修复与优化 (Bug Fixes & Refactoring)
+
+- **`camoufox_compat.py`**：
+  - 新增 `_PageWaiter` 兼容类，同时支持 `page.wait.doc_loaded()` 与 `page.wait(seconds)` 调用。
+  - 增强 `_TURNSTILE_SHIM_JS` 对 `render`、`getResponse`、`execute` 的代理拦截与 callback 保存。
+- **`captcha_solver.py`**：
+  - 升级 `activate_turnstile_bridge`，返回包含 `renderCalls`、`pending`、`fired` 等结构化监控指标。
+  - 增强 `solve_and_inject`，确保打码成功后同时触发 bridge 与 input 赋值。
+- **`registration_browser.py`**：
+  - 将 `browser_engine` 与 `browser_runtime` 加入 `_OWN_NAMES` 防止命名空间污染覆盖。
+  - 完善 `fill_profile_and_submit` 中的超时与重试保护，增加提交前延时确保 React state 写入生效。
+
+---
+
+## [v2.0.4] - 2026-09-28
+
+- 容器内热更新支持（无需宿主机 watcher）
+- API Key 列表与管理面板显示修复
+- 注册线路默认代理配置支持
+- Go 主程序并发连接池与超时参数优化
