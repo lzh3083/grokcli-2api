@@ -289,7 +289,7 @@ def validate_config_structure(raw):
         "email_provider": {"duckmail", "yyds", "cloudflare", "cloudmail", "outlook"},
         "cloudflare_auth_mode": {"query-key", "bearer", "x-api-key", "x-admin-auth", "x-user-token", "none"},
         "grok2api_pool_name": {"ssoBasic", "ssoSuper"},
-        "proxy_mode": {"auto", "direct", "single", "pool"},
+        "proxy_mode": {"auto", "direct", "single", "pool", "novproxy"},
         "proxy_fallback": {"none", "direct", "single"},
         "proxy_pool_endpoint_mode": {"auto", "fixed", "rotating"},
         "proxy_pool_probe_provider": {"cloudflare", "ipinfo"},

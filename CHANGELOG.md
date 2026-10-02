@@ -4,6 +4,17 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.0.7] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **原生支持 NovProxy 动态住宅/家宽代理自动接入与国家指纹自适应**：
+  - 针对东京节点机房 IP（Cloudflare WARP / 数据中心段）导致账号被 x.ai 后台打标降智的痛点，彻底打通 NovProxy 日本家庭住宅宽带（KDDI / NTT）出口。
+  - 新增 `proxy_mode: "novproxy"` 支持：每次注册时自动调用白名单 API（`https://white.novproxy.com/white/api`），动态提取 1 个高权重独立住宅代理节点，天然实现“一号一物理家宽 IP”。
+  - 增强 `us_consistency` 多国自适应：当代理出口为日本（JP）时，自动解除强制美国时区限制，将浏览器时区自适应对齐为 `Asia/Tokyo`、语言为 `ja-JP`，杜绝“日本 IP + 纽约时区”的指纹撕裂。
+
+---
+
 ## [v2.0.6] - 2026-10-02
 
 ### 🚀 重点功能与重大更新 (Major Improvements)

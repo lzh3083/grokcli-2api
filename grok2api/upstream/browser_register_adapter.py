@@ -120,9 +120,36 @@ def run_browser_registration(
     # registration egress can be switched from the admin console without a code
     # change. Unset config still means direct, which is the old behaviour.
     active_proxy = str(proxy or sess.get("proxy") or "").strip()
+
+    # NovProxy 动态住宅代理自适应提取
+    configured_mode = str(cfg.get("proxy_mode") or "").strip().lower()
+    if active_proxy.lower() in ("novproxy", "residential") or (not active_proxy and configured_mode in ("novproxy", "residential")):
+        try:
+            from grok2api.upstream.browser_register import novproxy
+            api_base = str(cfg.get("novproxy_api") or sess.get("novproxy_api") or "https://white.novproxy.com/white/api").strip()
+            region = str(cfg.get("novproxy_region") or sess.get("novproxy_region") or "JP").strip()
+            minutes = int(cfg.get("novproxy_minutes") or sess.get("novproxy_minutes") or 60)
+            _log_cb(f"[*] 正在从 NovProxy 提取实时动态住宅代理 ({region})...")
+            nodes = novproxy.fetch_nodes(
+                api_base=api_base,
+                region=region,
+                num=1,
+                minutes=minutes,
+                attempts=2,
+                timeout=12.0,
+                log=_log_cb,
+            )
+            if nodes:
+                node = nodes[0]
+                active_proxy = node if "://" in node else f"socks5h://{node}"
+                _log_cb(f"[+] 成功分配 NovProxy 住宅节点: {active_proxy}")
+        except Exception as n_exc:
+            _log_cb(f"[!] NovProxy 动态提取失败: {n_exc}")
+            active_proxy = ""
+
     if not active_proxy:
         try:
-            if str(cfg.get("proxy_mode") or "").strip().lower() == "single":
+            if configured_mode == "single":
                 active_proxy = str(cfg.get("proxy") or "").strip()
         except Exception:
             active_proxy = ""
@@ -251,6 +278,8 @@ def run_browser_registration(
         # B. 出口国家与网络环境自适应对齐（多国支持）
         if us_consistency.enabled():
             expect_c = str(cfg.get("us_consistency_expect_country") or "").strip()
+            if expect_c.upper() in ("AUTO", "ALL", "RAND", "ANY", "*"):
+                expect_c = ""
             detected_zone = us_consistency.align_timezone_with_proxy(active_proxy, expect_country=expect_c)
             if detected_zone:
                 _log_cb(f"[*] {us_consistency.describe()}")
