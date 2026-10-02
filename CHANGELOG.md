@@ -4,6 +4,15 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.0.8] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **升级官方 Grok CLI 协议版本标识（0.2.93 -> 1.0.13）**：
+  - 针对 x.ai 上游针对客户端版本的强制校验拦截（`Your Grok CLI version (0.2.93) is outdated. Please update to version 1.0.13 or later`），全面更新 Go 主程序与 Python 运行时请求头中的 `x-grok-client-version` 及 User-Agent 协议标识至 `1.0.13`，打通最新 API 会话交互。
+
+---
+
 ## [v2.0.7] - 2026-10-02
 
 ### 🚀 重点功能与重大更新 (Major Improvements)

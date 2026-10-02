@@ -217,7 +217,7 @@ func buildCLIProxyRecord(entry map[string]any, aid string) map[string]any {
 	if headers == nil {
 		headers = map[string]any{
 			"X-XAI-Token-Auth":         "xai-grok-cli",
-			"x-grok-client-version":    "0.2.93",
+			"x-grok-client-version":    "1.0.13",
 			"x-grok-client-identifier": "grok-shell",
 		}
 	}

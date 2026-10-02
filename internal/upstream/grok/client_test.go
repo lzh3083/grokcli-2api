@@ -21,7 +21,7 @@ func TestOpenUsesResponsesPathAndBridgesChatChunks(t *testing.T) {
 		for name, want := range map[string]string{
 			"Authorization":         "Bearer token",
 			"X-Xai-Token-Auth":      "xai-grok-cli",
-			"X-Grok-Client-Version": "0.2.93",
+			"X-Grok-Client-Version": "1.0.13",
 			"X-Grok-Conv-Id":        "sess-abc",
 		} {
 			if got := r.Header.Get(name); got != want {

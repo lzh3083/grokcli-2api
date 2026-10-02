@@ -97,7 +97,7 @@ MODELS_CACHE = Path(
 
 # Client headers for upstream proxy (version string only — no local CLI binary)
 # Keep surface as grok-cli so cli-chat-proxy accepts the session.
-CLI_VERSION = os.getenv("GROK2API_CLI_VERSION", "0.2.93")
+CLI_VERSION = os.getenv("GROK2API_CLI_VERSION", "1.0.13")
 CLIENT_SURFACE = os.getenv("GROK2API_CLIENT_SURFACE", "grok-cli")
 CLIENT_IDENTIFIER = os.getenv("GROK2API_CLIENT_IDENTIFIER", "grokcli-2api")
 

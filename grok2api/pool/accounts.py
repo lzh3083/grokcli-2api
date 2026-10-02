@@ -1119,7 +1119,7 @@ def build_cliproxyapi_export_record(entry: dict[str, Any], *, aid: str = "") -> 
     if not isinstance(headers, dict) or not headers:
         headers = {
             "X-XAI-Token-Auth": "xai-grok-cli",
-            "x-grok-client-version": "0.2.93",
+            "x-grok-client-version": "1.0.13",
             "x-grok-client-identifier": "grok-shell",
         }
     base_url = (

@@ -133,7 +133,7 @@ func (c *Client) Open(ctx context.Context, account Account, model string, body m
 func (c *Client) Headers(token, model string, convID ...string) map[string]string {
 	version := c.CLIversion
 	if version == "" {
-		version = "0.2.93"
+		version = "1.0.13"
 	}
 	// Defaults match CPA/xAI workspace shell headers that hit prompt cache.
 	// Do not force model override by default: CPA cache-hit traffic often omits it.
