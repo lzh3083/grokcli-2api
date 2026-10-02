@@ -333,6 +333,13 @@ def run_browser_registration(
             raise RuntimeError("未能从浏览器会话中提取到 sso cookie")
         _log_cb(f"[+] 成功获取 SSO Cookie (长度={len(sso)})")
 
+        # 流量节省关键优化：SSO已获取，立即关闭浏览器并断开代理连接，避免后台长连接偷跑流量
+        try:
+            registration_browser.stop_browser()
+            registration_browser.cleanup_runtime_memory(log_callback=_log_cb, reason="SSO已获取提前释放浏览器")
+        except Exception:
+            pass
+
         # C. SSO 风控早停检查 (读取 grok.com botFlagSource / policy=deny)
         if cfg.get("sso_risk_gate_enabled", True):
             _log_cb("[*] 正在执行 SSO 风控早停安全检查 (botFlagSource / policy)...")

@@ -638,8 +638,18 @@ class CamoufoxOptions:
                 time.tzset()
             except Exception:
                 pass
+        # 默认省流量首选项：禁用网页外置字体、遥测上报与自动更新
+        default_prefs = {
+            "browser.display.use_document_fonts": 0,
+            "datareporting.policy.dataSubmissionEnabled": False,
+            "toolkit.telemetry.enabled": False,
+            "browser.safebrowsing.downloads.enabled": False,
+            "extensions.update.enabled": False,
+        }
+        merged_prefs = dict(default_prefs)
         if self._prefs:
-            opts["firefox_user_prefs"] = dict(self._prefs)
+            merged_prefs.update(self._prefs)
+        opts["firefox_user_prefs"] = merged_prefs
         if self._user_data_path:
             opts["persistent_context"] = True
             opts["user_data_dir"] = self._user_data_path
@@ -831,6 +841,56 @@ class CamoufoxBrowser:
         # 每个页面加载前安装 Turnstile 垫片，详见 _TURNSTILE_SHIM_JS 的说明。
         try:
             self._context.add_init_script(_TURNSTILE_SHIM_JS)
+        except Exception:
+            pass
+
+        # 流量节省：在 Context 级拦截字体、视频、遥测打点及纯装饰图片
+        try:
+            def _traffic_filter(route):
+                try:
+                    req = route.request
+                    url = req.url.lower()
+                    rt = req.resource_type
+
+                    # 1. 核心白名单：Cloudflare 验证与 Turnstile 必须放行
+                    if "challenges.cloudflare.com" in url or "cloudflare" in url or "turnstile" in url:
+                        route.continue_()
+                        return
+
+                    # 2. 遥测、打点与分析上报（拦截省流）
+                    telemetry = (
+                        "statsig.com",
+                        "datadoghq.com",
+                        "sentry.io",
+                        "google-analytics.com",
+                        "googletagmanager.com",
+                        "analytics.x.ai",
+                    )
+                    if any(t in url for t in telemetry):
+                        route.abort()
+                        return
+
+                    # 3. 字体与多媒体文件（无头注册完全不依赖，拦截省流数兆）
+                    if rt in ("font", "media") or any(
+                        url.endswith(ext)
+                        for ext in (".woff2", ".woff", ".ttf", ".otf", ".mp4", ".webm", ".mp3")
+                    ):
+                        route.abort()
+                        return
+
+                    # 4. 纯装饰性大图片（Next.js 图标、横幅、SVG 动画）
+                    if rt == "image":
+                        route.abort()
+                        return
+
+                    route.continue_()
+                except Exception:
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+
+            self._context.route("**/*", _traffic_filter)
         except Exception:
             pass
 

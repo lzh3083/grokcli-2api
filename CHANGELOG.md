@@ -4,6 +4,24 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.0.9] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **动态住宅家宽流量极致优化体系 (Traffic Saving Engine)**：
+  - **网络层路由拦截 (Context Route Abort)**：在 Camoufox 浏览器 Context 层拦截所有对注册与过盾无实质作用的重型资源：
+    - 拦截字体与媒体文件（`.woff2`、`.woff`、`.ttf`、`.mp4`、`.webm` 等）；
+    - 拦截所有纯装饰性大图片（Next.js 图标、横幅、SVG 动画等）；
+    - 拦截分析遥测域名（`statsig.com`、`datadoghq.com`、`sentry.io`、`google-analytics.com`、`analytics.x.ai`）；
+    - 严格白名单放行 `challenges.cloudflare.com`、Turnstile 核心脚本与 Next.js 核心 JS 逻辑。
+  - **首选项调优 (Firefox Prefs Tuning)**：
+    - 默认关闭外部远程字体下载（`browser.display.use_document_fonts=0`）；
+    - 禁用浏览器自带的遥测上报与自动更新。
+  - **提前切断与连接回收 (Early Browser Reclaim)**：
+    - 一旦成功提取 SSO Cookie，立即主动切断 Camoufox 浏览器进程并回收代理连接，杜绝后续风控检测与后处理期间后台连接持续偷跑住宅流量。
+
+---
+
 ## [v2.0.8] - 2026-10-02
 
 ### 🚀 重点功能与重大更新 (Major Improvements)
