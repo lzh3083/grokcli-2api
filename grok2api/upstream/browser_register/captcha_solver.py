@@ -185,21 +185,41 @@ def extract_turnstile_key(page):
 
 
 def inject_turnstile_token(page, token):
-    """把 token 写进 cf-turnstile-response 并触发回调。
+    """把 token 写进 cf-turnstile-response、window.__solverToken 并触发回调。
 
-    Turnstile 的校验既看表单字段，也依赖渲染时的回调；只填 input 有时
-    不会被识别，所以这里同时尝试调用常见的全局回调。
+    Turnstile 的校验既看表单字段，也依赖渲染时的回调；x.ai 的注册守卫实测并不读
+    隐藏 input 的值（填了 input 点提交也只发 ValidatePassword），而是走 Turnstile
+    的 JS API。因此这里同时把 token 挂到 ``window.__solverToken``——camoufox_compat
+    安装的 ``window.turnstile`` 垫片会让 ``getResponse()`` 返回它——并补齐 input。
     """
     script = """
     const token = arguments[0];
+    // 让 window.turnstile 垫片的 getResponse() 返回这个 token。
+    window.__solverToken = token;
     let filled = 0;
-    document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]').forEach(el => {
-        el.value = token;
+    let inputs = document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+    if (inputs.length === 0) {
+        const el = document.createElement('input');
+        el.type = 'hidden';
+        el.name = 'cf-turnstile-response';
+        (document.body || document.documentElement).appendChild(el);
+        inputs = document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+    }
+    inputs.forEach(el => {
+        const proto = Object.getPrototypeOf(el);
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) { desc.set.call(el, token); } else { el.value = token; }
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         filled += 1;
     });
     let called = 0;
+    try {
+        const ts = window.turnstile;
+        if (ts && typeof ts.getResponse === 'function') {
+            if (String(ts.getResponse() || '') === String(token)) { called += 1; }
+        }
+    } catch (_) {}
     for (const key of Object.keys(window)) {
         try {
             if (typeof window[key] === 'function' && /turnstile|onSuccess|callback/i.test(key)) {
@@ -208,7 +228,7 @@ def inject_turnstile_token(page, token):
             }
         } catch (_) {}
     }
-    return JSON.stringify({ filled, called });
+    return JSON.stringify({ filled, called, shim: !!window.__g2aTurnstileShim });
     """
     try:
         raw = page.run_js(script, token)
@@ -219,6 +239,139 @@ def inject_turnstile_token(page, token):
     except Exception:
         data = {"filled": 0, "called": 0}
     return data if isinstance(data, dict) else {"filled": 0, "called": 0}
+
+
+# 在页面里自建 Turnstile 组件。x.ai 的注册页在 Camoufox 下不会自己渲染
+# Turnstile（window.turnstile 永不出现、也没有 .cf-turnstile 节点），但它对
+# 注入进来的组件一视同仁：只要页面上存在 .cf-turnstile[data-sitekey] 并点击它，
+# 挑战就会在 Cloudflare 的 iframe 里跑完，token 直接写进
+# input[name="cf-turnstile-response"]。这条路径与本地 solver 的成功路径完全一致
+# （solver 就是注入 .cf-turnstile 后反复点击），且不需要外部打码服务。
+_INJECT_WIDGET_JS = """(sitekey) => {
+    try {
+        document.querySelectorAll('.cf-turnstile').forEach(el => el.remove());
+        document.querySelectorAll('[data-sitekey]').forEach(el => el.remove());
+    } catch (e) {}
+    const div = document.createElement('div');
+    div.className = 'cf-turnstile';
+    div.setAttribute('data-sitekey', sitekey);
+    div.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;';
+    (document.body || document.documentElement).appendChild(div);
+    window.__g2aWidget = div;
+    if (!document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) {
+        const s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        s.async = true;
+        s.defer = true;
+        document.head.appendChild(s);
+    }
+    return 'injected';
+}"""
+
+_READ_WIDGET_TOKEN_JS = """() => {
+    const el = document.querySelector('input[name="cf-turnstile-response"]');
+    if (!el) return '';
+    return String(el.value || '');
+}"""
+
+
+def solve_turnstile_in_page(page, sitekey, log=None, timeout_sec=45):
+    """在页面内注入 .cf-turnstile 组件并点击，等它自己产出 token。
+
+    返回 token 字符串；失败返回空串。该函数只做「页内求解」，不依赖外部打码
+    服务，因此在 solver 不可用或未配置时也能工作。
+    """
+    native = getattr(page, "native", None) or page
+    sitekey = str(sitekey or "").strip()
+    if not sitekey:
+        return ""
+
+    def _log(msg):
+        if not log:
+            return
+        try:
+            log(msg)
+        except Exception:
+            pass
+
+    try:
+        native.evaluate(_INJECT_WIDGET_JS, sitekey)
+    except Exception as exc:
+        _log(f"[*] 页内 Turnstile 组件注入失败: {str(exc)[:90]}")
+        return ""
+
+    deadline = time.time() + max(float(timeout_sec or 0), 5.0)
+    attempt = 0
+    clicks = 0
+    while time.time() < deadline:
+        try:
+            token = native.evaluate(_READ_WIDGET_TOKEN_JS) or ""
+        except Exception:
+            token = ""
+        if token:
+            _log(f"[*] 页内 Turnstile 已产出 token（{len(str(token))} 字符）")
+            return str(token)
+
+        attempt += 1
+        # 与本地 solver 同节奏：从第 2 轮起每 2 轮点一次组件，最多 12 次。
+        if attempt > 1 and attempt % 2 == 0 and clicks < 12:
+            try:
+                locator = native.locator(".cf-turnstile").first
+                if locator.count() > 0:
+                    locator.click(timeout=800, force=True)
+                    clicks += 1
+            except Exception:
+                pass
+        time.sleep(0.6)
+    return ""
+
+
+def activate_turnstile_bridge(page, token):
+    """把 token 喂给 x.ai 的 React Turnstile 组件（写入它的 onToken state）。
+
+    x.ai 通过 ``<script src=".../turnstile/v0/api.js?onload=XXXX">`` 加载
+    Turnstile，脚本执行后会调用 ``window.XXXX()`` 把 API 交给 React Context；
+    组件再调 ``turnstile.render(el, {sitekey, callback})``，callback 即 onToken，
+    最终写进提交守卫读的那个 React state。
+
+    在 accounts.x.ai + Camoufox 下脚本体不执行、``window.XXXX`` 永不调用、
+    ``window.turnstile`` 永不出现，于是 onToken 永不触发。这里手动补齐这条链路：
+    调用 x.ai 的 onload 回调 + 触发垫片 render（垫片会用 __solverToken 调 callback）。
+    """
+    native = getattr(page, "native", None) or page
+    script = """(token) => {
+    window.__solverToken = token;
+    const out = { onloadCalled: null, renderCalled: false, errors: [] };
+    const names = [];
+    try {
+        document.querySelectorAll('script[src*="challenges.cloudflare.com/turnstile"]').forEach(s => {
+            const m = /[?&]onload=([A-Za-z0-9_$]+)/.exec(s.src || '');
+            if (m) names.push(m[1]);
+        });
+    } catch (e) { out.errors.push('scan:' + e); }
+    for (const n of names) {
+        try {
+            if (typeof window[n] === 'function') { window[n](); out.onloadCalled = n; break; }
+        } catch (e) { out.errors.push('onload:' + n + ':' + e); }
+    }
+    try {
+        const ts = window.turnstile;
+        if (ts && typeof ts.render === 'function') {
+            let cbFired = false;
+            ts.render(window.__g2aWidget || document.createElement('div'), {
+                sitekey: '',
+                callback: function (t) { cbFired = !!t; }
+            });
+            out.renderCalled = true;
+            out.cbFired = cbFired;
+        }
+    } catch (e) { out.errors.push('render:' + e); }
+    return JSON.stringify(out);
+    }"""
+    try:
+        return native.evaluate(script, token)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)[:120]})
 
 
 def is_local_endpoint(api_base):

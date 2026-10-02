@@ -1,8 +1,17 @@
-"""提供共享的 HTTP 请求、代理处理和 Chromium 启动参数。"""
+"""提供共享的 HTTP 请求、代理处理和浏览器启动参数。
+
+浏览器引擎可通过 ``GROK2API_BROWSER_ENGINE`` 选择：
+
+* ``camoufox``（默认）—— 加固版 Firefox，走 Juggler 协议，自带指纹伪造。
+  2026-09-28 起 x.ai 上线 Cloudflare Bot Management JSD 检测后，Chromium
+  （CDP 驱动 + 容器内无 GPU）一律拿不到 ``cf_clearance``，注册静默失败；
+  Camoufox 实测可稳定通过。
+* ``chromium`` —— 旧的 DrissionPage 实现，保留用于回退排查。
+"""
 import os
 import urllib.parse
 
-from DrissionPage import ChromiumOptions
+from camoufox_compat import CamoufoxOptions, parse_proxy
 from curl_cffi import requests
 from proxy_bridge import (
     LocalAuthProxyBridge,
@@ -176,7 +185,7 @@ def prepare_browser_proxy(use_proxy=True, log_callback=None):
 
 
 def apply_browser_proxy_option(options, proxy):
-    """把代理写进 Chromium 启动参数。
+    """把代理写进浏览器启动配置。
 
     DrissionPage 的 ChromiumOptions.set_proxy() **不支持 socks5** —— 它只会
     打印 "this proxy is not supported for the time being" 然后静默忽略，
@@ -184,8 +193,14 @@ def apply_browser_proxy_option(options, proxy):
 
     而 Chromium 原生的 --proxy-server 是支持 socks5 的。所以这里对
     socks* 一律绕开 set_proxy，直接用启动参数。
+
+    CamoufoxOptions 走 Playwright 的 proxy 字典，原生支持 socks5，直接
+    set_proxy 即可（兼容层会做 socks5h→socks5 归一化）。
     """
     if not proxy:
+        return
+    if isinstance(options, CamoufoxOptions):
+        options.set_proxy(proxy)
         return
     scheme = ""
     try:
@@ -201,7 +216,7 @@ def apply_browser_proxy_option(options, proxy):
         except Exception:
             pass
     if not hasattr(options, "set_argument"):
-        raise AttributeError("当前 DrissionPage ChromiumOptions 不支持设置浏览器代理")
+        raise AttributeError("当前浏览器 options 不支持设置代理")
     # Chromium's --proxy-server understands socks5://, socks4:// and http(s)://
     # only. The curl-style socks5h:// / socks4a:// spellings (remote DNS) are
     # rejected outright with ERR_NO_SUPPORTED_PROXIES, which renders a Chromium
@@ -220,7 +235,55 @@ def apply_browser_proxy_option(options, proxy):
         options.set_argument("--proxy-server", chromium_proxy)
 
 
+def browser_engine():
+    """当前浏览器引擎：``camoufox``（默认）或 ``chromium``。"""
+    raw = str(os.environ.get("GROK2API_BROWSER_ENGINE") or "").strip().lower()
+    if not raw:
+        try:
+            raw = str((_config or {}).get("browser_engine") or "").strip().lower()
+        except Exception:
+            raw = ""
+    return "chromium" if raw in ("chromium", "chrome", "drission") else "camoufox"
+
+
+def _configure_camoufox_options(options, browser_proxy="", extension_path=None):
+    """把注册流程需要的环境一致性设置写进 CamoufoxOptions。
+
+    注意：这里**不**调用 ``us_consistency.apply_browser_options()``。那套逻辑是
+    为 Chromium 写的（改 --lang、设可执行文件路径、注入 Chromium 风格的
+    Sec-CH-UA Client Hints）。Camoufox 的 ``os=["windows"]`` 已经生成了一整套
+    自洽的 Windows 指纹（UA / navigator.platform / WebGL / 字体 / 时区），
+    再叠一层 Chromium 的 Client Hints 只会制造新的矛盾——Firefox 本来就不发
+    Sec-CH-UA 头。
+    """
+    # x.ai 的 Cloudflare 对 headless 指纹判定极严，始终用窗口化 + Xvfb。
+    display = str(os.environ.get("DISPLAY") or "").strip()
+    force_headless = str((_config or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
+    if force_headless or not display:
+        options.headless(True)
+    apply_browser_proxy_option(options, browser_proxy)
+    # 时区仍需与代理出口地区对齐：Camoufox 支持显式指定，交给它而不是改进程 TZ。
+    try:
+        import us_consistency
+        us_consistency.configure(_config)
+        if us_consistency.enabled():
+            timezone = str(us_consistency.timezone_name() or "").strip()
+            locale = str(us_consistency.locale_name() or "").strip()
+            if timezone:
+                options.set_timezone(timezone)
+            if locale:
+                options.set_locale(locale)
+    except Exception:
+        pass
+    return options
+
+
 def create_browser_options(browser_proxy="", extension_path=None):
+    if browser_engine() == "camoufox":
+        return _configure_camoufox_options(
+            CamoufoxOptions(), browser_proxy=browser_proxy, extension_path=extension_path
+        )
+    from DrissionPage import ChromiumOptions
     options = ChromiumOptions()
     options.auto_port()
     options.set_timeouts(base=1)

@@ -7,8 +7,21 @@ import secrets
 import struct
 import time
 
-from DrissionPage import Chromium
-from DrissionPage.errors import ContextLostError, JavaScriptError, PageDisconnectedError
+try:  # DrissionPage 仅在 GROK2API_BROWSER_ENGINE=chromium 回退时可用
+    from DrissionPage import Chromium
+    from DrissionPage.errors import ContextLostError, JavaScriptError, PageDisconnectedError
+except Exception:  # pragma: no cover - Camoufox 模式下无需 DrissionPage
+    Chromium = None
+
+    class ContextLostError(Exception):
+        """DrissionPage 缺失时的占位异常。"""
+
+    class JavaScriptError(Exception):
+        """DrissionPage 缺失时的占位异常。"""
+
+    class PageDisconnectedError(Exception):
+        """DrissionPage 缺失时的占位异常。"""
+
 from curl_cffi import requests
 from proxy_pool import ProxyTransportError, safe_proxy_error_text
 # browser_runtime / mail_service / app_config own helpers this module calls.
@@ -20,6 +33,7 @@ from proxy_pool import ProxyTransportError, safe_proxy_error_text
 #   "浏览器启动失败，已重试4次: name 'create_browser_options' is not defined"
 # No module here imports registration_browser, so these imports are cycle-free.
 from browser_runtime import (
+    browser_engine,
     create_browser_options,
     get_configured_proxy,
     get_proxies,
@@ -435,21 +449,33 @@ def start_browser(log_callback=None, use_proxy=True):
                             log_callback("[*] 已按代理实际出口对齐时区: %s" % zone)
                 except Exception:
                     pass
-            browser = Chromium(create_browser_options(browser_proxy=browser_proxy))
+            engine = browser_engine()
+            options = create_browser_options(browser_proxy=browser_proxy)
+            if engine == "camoufox":
+                # Camoufox（加固版 Firefox，Juggler 协议 + 指纹伪造）能拿到
+                # cf_clearance；Chromium 走 CDP，2026-09-28 起必被 Cloudflare
+                # Bot Management 拦截，注册静默失败。
+                from camoufox_compat import CamoufoxBrowser
+                browser = CamoufoxBrowser(options)
+            else:
+                browser = Chromium(options)
             browser_proxy_bridge = bridge
             browser_started_with_proxy = bool(browser_proxy)
             tabs = browser.get_tabs()
             page = tabs[-1] if tabs else browser.new_tab()
             # 美国环境一致性：注入 navigator 覆盖脚本与 Client Hints，
             # 使 JS 可见指纹与 UA 声称的 Windows 桌面环境保持一致。
-            try:
-                import us_consistency
-                if us_consistency.enabled():
-                    us_consistency.apply_page_overrides(page)
-                    if log_callback:
-                        log_callback("[*] %s" % us_consistency.describe())
-            except Exception:
-                pass
+            # Camoufox 走 Juggler 且自带完整指纹伪造，没有 run_cdp，
+            # 手动注入 Chromium 风格的 Client Hints 反而与 Firefox 冲突。
+            if engine != "camoufox":
+                try:
+                    import us_consistency
+                    if us_consistency.enabled():
+                        us_consistency.apply_page_overrides(page)
+                        if log_callback:
+                            log_callback("[*] %s" % us_consistency.describe())
+                except Exception:
+                    pass
             if log_callback and getattr(browser, "user_data_path", None):
                 log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
             if log_callback and get_configured_proxy():
@@ -1272,11 +1298,58 @@ try {
     }
 
 
-def _try_solve_turnstile_via_solver(log_callback=None):
-    """等待超时后交给打码平台/本地 solver 解 Turnstile。
+# x.ai 注册页的 Turnstile sitekey。页面 HTML 与内联脚本里都能读到，这里作为
+# 最后兜底，避免因页面尚未渲染完而解析不到。
+_DEFAULT_TURNSTILE_SITEKEY = "0x4AAAAAAAhr9JGVDZbrZOo0"
 
-    返回 True 表示 token 已注入页面（仍需重新读状态确认）。任何异常都
-    吞掉并返回 False —— 打码是可选增强，不能让它把注册主流程带崩。
+
+def _resolve_turnstile_sitekey(log_callback=None):
+    """解析 Turnstile sitekey：配置 → 页面 → 内置兜底。"""
+    try:
+        import captcha_solver
+        settings = captcha_solver.settings_from_config()
+        if settings:
+            key = str(settings.get("sitekey") or "").strip()
+            if key:
+                return key
+    except Exception:
+        pass
+    if page is not None:
+        try:
+            found = page.run_js(
+                r"""
+try {
+  const node = document.querySelector('[data-sitekey]');
+  if (node) {
+    const v = node.getAttribute('data-sitekey');
+    if (v) return String(v).trim();
+  }
+  const html = document.documentElement ? document.documentElement.innerHTML : '';
+  const m = html.match(/0x4AAAAAA[A-Za-z0-9_-]{10,}/);
+  if (m) return m[0];
+  return '';
+} catch (e) { return ''; }
+                """
+            )
+            found = str(found or "").strip()
+            if found:
+                return found
+        except Exception:
+            pass
+    return _DEFAULT_TURNSTILE_SITEKEY
+
+
+def _try_solve_turnstile_via_solver(log_callback=None):
+    """解 Turnstile 并把 token 注入页面。
+
+    优先走「页内自建组件 + 点击」：x.ai 在 Camoufox 下不会自己渲染 Turnstile
+    （window.turnstile 永不出现），但注入 .cf-turnstile[data-sitekey] 后点击它，
+    挑战会正常跑完并把 token 写进 input[name="cf-turnstile-response"]——这条路径
+    与本地 solver 的成功路径完全一致，且不依赖外部打码服务。失败再退回打码平台。
+
+    两条路径拿到 token 后都会调 activate_turnstile_bridge：x.ai 的提交守卫读的是
+    React state（由 Turnstile 组件的 onToken 写入），不是 input.value，只填 input
+    点提交只会触发 ValidatePassword。
     """
     try:
         import captcha_solver
@@ -1284,12 +1357,44 @@ def _try_solve_turnstile_via_solver(log_callback=None):
         if log_callback:
             log_callback(f"[*] 打码模块不可用，继续被动等待: {str(exc)[:80]}")
         return False
+
+    sitekey = _resolve_turnstile_sitekey(log_callback)
+
+    # 路径 1：页内自建组件 + 点击（不依赖外部服务）
+    if sitekey:
+        if log_callback:
+            log_callback("[*] 尝试页内自建 Turnstile 组件求解...")
+        token = ""
+        try:
+            token = captcha_solver.solve_turnstile_in_page(
+                page,
+                sitekey,
+                log=log_callback,
+                timeout_sec=50,
+            )
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[*] 页内求解异常: {str(exc)[:100]}")
+        if token:
+            try:
+                captcha_solver.inject_turnstile_token(page, token)
+            except Exception:
+                pass
+            try:
+                captcha_solver.activate_turnstile_bridge(page, token)
+            except Exception:
+                pass
+            if log_callback:
+                log_callback("[*] 页内 Turnstile 求解成功并已桥接到 React state")
+            return True
+
+    # 路径 2：外部打码平台 / 本地 solver
     settings = captcha_solver.settings_from_config()
     if not settings:
         return False
     if log_callback:
         target = settings.get("api_base") or "默认端点"
-        log_callback(f"[*] 自动等待超时，改用打码过盾（{target}）")
+        log_callback(f"[*] 页内求解未成功，改用打码过盾（{target}）")
     # Cloudflare 会核对 token 与提交请求的出口 IP：solver 走本机 IP 而注册
     # 走住宅代理时，token 能注入但服务端拒绝，最终卡在拿不到 sso cookie。
     # 所以打码前把当前租约代理同步给 solver。
@@ -1304,7 +1409,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
             log=log_callback,
             api_base=settings["api_base"],
             timeout_sec=settings["timeout_sec"],
-            sitekey=settings.get("sitekey") or "",
+            sitekey=settings.get("sitekey") or sitekey or "",
         )
     except Exception as exc:
         if log_callback:
@@ -1317,6 +1422,16 @@ def _try_solve_turnstile_via_solver(log_callback=None):
             )
             if not result.get("ua_matched", True):
                 log_callback("[!] 打码 UA 与浏览器不一致，token 可能不被接受")
+        # 打码只往 input 里写值，而 x.ai 的提交守卫读的是 React state，
+        # 所以还要把 token 桥接给 React 组件的 onToken。
+        try:
+            live = (_read_turnstile_state() or {}).get("token") or ""
+            if live:
+                captcha_solver.activate_turnstile_bridge(page, live)
+                if log_callback:
+                    log_callback("[*] 打码 token 已桥接到 React state")
+        except Exception:
+            pass
         return True
     if log_callback:
         log_callback(f"[*] 打码未成功，继续被动等待: {result.get('reason') or '未知原因'}")
@@ -1342,6 +1457,7 @@ def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
     except Exception:
         solver_after = 10.0
     solver_attempted = False
+    in_page_attempted = False
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -1355,6 +1471,14 @@ def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
             return token
 
         if status == TURNSTILE_ABSENT:
+            # 页面里根本没有 Turnstile 组件。x.ai 在 Camoufox 下不会自己渲染，
+            # 被动等待永远等不到 token，所以主动注入一个组件并点击求解。
+            if not in_page_attempted:
+                in_page_attempted = True
+                if _try_solve_turnstile_via_solver(log_callback):
+                    last_log_at = 0.0
+                    last_state = None
+                    continue
             return ""
 
         if status == TURNSTILE_FAILED:
@@ -1467,46 +1591,80 @@ try {
     }
     return null;
   }
-  const input = document.querySelector('input[name="cf-turnstile-response"]');
-  const roots = [];
-  if (input) {
-    roots.push(input);
-    let parent = input.parentElement;
-    for (let i = 0; i < 5 && parent; i++) { roots.push(parent); parent = parent.parentElement; }
-    if (input.parentElement) {
-      for (const child of input.parentElement.children) roots.push(child);
+  // 定位 React 根：React 18+ 在容器上挂 __reactContainer$，旧版本挂 __reactFiber$。
+  // Cloudflare 的 widget 位于 closed shadow DOM 中，cf-turnstile-response 这个
+  // input 在主文档里可能根本不存在，从它向上爬是走不到 React 树的，所以改为
+  // 从根 fiber 出发做一次有界 BFS，遍历整棵树找 onToken。
+  function rootFiberOf(el) {
+    if (!el) return null;
+    for (const name of Object.getOwnPropertyNames(el)) {
+      if (name.indexOf('__reactContainer$') === 0) return el[name];
+      if (name.indexOf('__reactFiber$') === 0) return el[name];
+      if (name.indexOf('__reactInternalInstance$') === 0) return el[name];
+    }
+    return null;
+  }
+  const hosts = [document.querySelector('#root'), document.body, document.documentElement]
+    .filter(Boolean);
+  let rootFiber = null;
+  for (const host of hosts) {
+    rootFiber = rootFiberOf(host);
+    if (rootFiber) break;
+  }
+  // 兜底：任意一个带 fiber 的元素，沿 return 走到顶。
+  if (!rootFiber) {
+    for (const el of document.querySelectorAll('*')) {
+      const f = rootFiberOf(el);
+      if (f) {
+        let top = f, guard = 0;
+        while (top && top.return && guard < 5000) { top = top.return; guard += 1; }
+        rootFiber = top;
+        break;
+      }
     }
   }
-  // Fallback: scan a bounded set of elements that carry a fiber, in case the
-  // widget container is not an ancestor/sibling of the hidden input.
-  let scanned = 0;
-  for (const el of document.querySelectorAll('div, span, form, button, section')) {
-    if (fiberKey(el)) { roots.push(el); scanned++; }
-    if (scanned >= 40) break;
-  }
-  const traced = [];
-  for (const el of roots) {
-    const key = fiberKey(el);
-    if (!key) continue;
-    let fiber = el[key];
-    let depth = 0;
-    while (fiber && depth < 100) {
-      const props = fiber.memoizedProps;
-      if (props && typeof props.onToken === 'function') {
-        try { props.onToken(token); return 'called-onToken@d' + depth; }
-        catch (e) { return 'onToken-threw:' + String(e).slice(0, 80); }
+  if (!rootFiber) return 'not-found:no-react-root';
+  const seen = new Set();
+  const queue = [rootFiber];
+  let visited = 0;
+  const propNames = new Set();
+  while (queue.length && visited < 20000) {
+    const fiber = queue.shift();
+    if (!fiber || seen.has(fiber)) continue;
+    seen.add(fiber);
+    visited += 1;
+    const props = fiber.memoizedProps;
+    if (props && typeof props === 'object') {
+      for (const k of Object.keys(props)) {
+        if (/token|success|callback|verify|solve/i.test(k)) propNames.add(k);
       }
-      if (props && typeof props.onSuccess === 'function') {
-        try { props.onSuccess(token); return 'called-onSuccess@d' + depth; }
-        catch (e) {}
+      for (const k of ['onToken', 'onSuccess', 'onVerify', 'onSolved', 'callback', 'onCallback']) {
+        if (typeof props[k] === 'function') {
+          try { props[k](token); return 'called-' + k + '@' + visited; }
+          catch (e) { return k + '-threw:' + String(e).slice(0, 80); }
+        }
       }
-      fiber = fiber.return;
-      depth += 1;
     }
-    traced.push('d' + depth);
-    if (traced.length >= 8) break;
+    // hooks 链：部分实现把回调藏在 memoizedState 里。
+    let hook = fiber.memoizedState;
+    let hookGuard = 0;
+    while (hook && hookGuard < 40) {
+      const hs = hook.memoizedState;
+      if (hs && typeof hs === 'object') {
+        for (const k of ['onToken', 'onSuccess', 'callback']) {
+          if (typeof hs[k] === 'function') {
+            try { hs[k](token); return 'called-hook-' + k + '@' + visited; }
+            catch (e) {}
+          }
+        }
+      }
+      hook = hook.next;
+      hookGuard += 1;
+    }
+    if (fiber.child) queue.push(fiber.child);
+    if (fiber.sibling) queue.push(fiber.sibling);
   }
-  return 'not-found:roots=' + roots.length + ',traced=' + traced.join('|');
+  return 'not-found:visited=' + visited + ',props=' + Array.from(propNames).slice(0, 12).join(',');
 } catch (e) { return 'fatal:' + String(e).slice(0, 100); }
 """
 
@@ -1530,7 +1688,15 @@ def inject_turnstile_token_into_react(token, log_callback=None):
 
 
 def _publish_solver_token_to_page_state(log_callback=None):
-    """Read the solver token off the page and hand it to the React component."""
+    """Read the solver token off the page and hand it to the React component.
+
+    主路径是 activate_turnstile_bridge：调用 x.ai 的 api.js?onload 回调并触发
+    window.turnstile 垫片的 render，让 Turnstile 组件的 onToken 拿到 token，
+    从而写进提交守卫读的那个 React state。
+
+    原来的 fiber 注入（inject_turnstile_token_into_react）保留为兜底，但实测
+    x.ai 页面在 Camoufox 下没有任何 React fiber 属性，它必然返回 no-react-root。
+    """
     try:
         token = page.run_js(
             'try{var i=document.querySelector(\'input[name="cf-turnstile-response"]\');'
@@ -1543,6 +1709,14 @@ def _publish_solver_token_to_page_state(log_callback=None):
         log_callback(f"[*] 提交前读取 solver token 长度={len(token)}")
     if not token:
         return ""
+    try:
+        import captcha_solver
+        bridge = captcha_solver.activate_turnstile_bridge(page, token)
+        if log_callback:
+            log_callback(f"[*] Turnstile 桥接结果: {str(bridge)[:180]}")
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] Turnstile 桥接异常: {str(exc)[:100]}")
     return inject_turnstile_token_into_react(token, log_callback)
 
 
@@ -1777,6 +1951,11 @@ return titleHit ? 'final-page' : 'not-final-page';
                         )
                         last_submit_retry = now
                         continue
+
+                    # 重试点击前把 token 重新桥接一次。token 是一次性的、约 120 秒
+                    # 过期，首次提交若因 React state 未拿到 token 而失败，重试时
+                    # 必须重新喂给 onToken，否则点多少次都不会发出注册请求。
+                    _publish_solver_token_to_page_state(log_callback)
 
                     retried = page.run_js(
                         r"""
