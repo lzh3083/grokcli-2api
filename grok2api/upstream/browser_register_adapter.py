@@ -89,6 +89,28 @@ def run_browser_registration(
     check_cancel()
     update("registering", "preparing browser environment")
 
+    # Define status update callbacks early
+    def _log_cb(msg: str) -> None:
+        check_cancel()
+        text = str(msg or "").strip()
+        print(f"[{sid}] {text}")
+        # Map browser stages to grok2api UI phases
+        if "打开注册页" in text or "visiting" in text.lower():
+            update("registering", text)
+        elif "验证码" in text or "邮箱" in text:
+            update("registering", text)
+        elif "Turnstile" in text or "打码" in text or "过盾" in text:
+            update("solving_turnstile", text)
+        elif "资料" in text or "profile" in text.lower():
+            update("registering", text)
+        elif "sso" in text.lower():
+            update("registering", text)
+        else:
+            update("registering", text)
+
+    def _cancel_cb() -> None:
+        check_cancel()
+
     # 1. Load active config
     cfg = app_config.load_config()
 
@@ -234,28 +256,6 @@ def run_browser_registration(
         )
     except Exception as exc:
         print(f"[{sid}] solver proxy sync warning: {exc}", flush=True)
-
-    # 5. Define status update callbacks
-    def _log_cb(msg: str) -> None:
-        check_cancel()
-        text = str(msg or "").strip()
-        print(f"[{sid}] {text}")
-        # Map browser stages to grok2api UI phases
-        if "打开注册页" in text or "visiting" in text.lower():
-            update("registering", text)
-        elif "验证码" in text or "邮箱" in text:
-            update("registering", text)
-        elif "Turnstile" in text or "打码" in text or "过盾" in text:
-            update("solving_turnstile", text)
-        elif "资料" in text or "profile" in text.lower():
-            update("registering", text)
-        elif "sso" in text.lower():
-            update("registering", text)
-        else:
-            update("registering", text)
-
-    def _cancel_cb() -> None:
-        check_cancel()
 
     # 6. Run the browser registration steps
     email = ""
