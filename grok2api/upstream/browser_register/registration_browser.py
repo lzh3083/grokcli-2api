@@ -32,6 +32,7 @@ from proxy_pool import ProxyTransportError, safe_proxy_error_text
 #   "浏览器启动失败，已重试4次: name 'prepare_browser_proxy' is not defined"
 #   "浏览器启动失败，已重试4次: name 'create_browser_options' is not defined"
 # No module here imports registration_browser, so these imports are cycle-free.
+import browser_runtime
 from browser_runtime import (
     browser_engine,
     create_browser_options,
@@ -88,7 +89,7 @@ def _run_pre_submit_js(script, *args):
         if _is_pre_submit_js_transient(exc):
             raise AccountRetryNeeded(f"提交前浏览器 JS 暂时失败: {exc}") from exc
         raise
-_OWN_NAMES = {'is_cloudflare_block_response', 'response_preview', 'start_browser', 'enable_nsfw_for_token', 'stop_browser_proxy_bridge', 'set_tos_accepted', 'fill_email_and_submit', 'getTurnstileToken', 'set_birth_date', 'generate_random_birthdate', 'fill_profile_and_submit', 'click_email_signup_button', 'wait_for_sso_cookie', 'fill_code_and_submit', 'build_profile', 'cleanup_runtime_memory', 'open_signup_page', 'stop_browser', 'encode_grpc_nsfw_settings', 'restart_browser', 'has_profile_form', 'update_nsfw_settings', 'refresh_active_page', 'check_imagine_capability'}
+_OWN_NAMES = {'is_cloudflare_block_response', 'response_preview', 'start_browser', 'enable_nsfw_for_token', 'stop_browser_proxy_bridge', 'set_tos_accepted', 'fill_email_and_submit', 'getTurnstileToken', 'set_birth_date', 'generate_random_birthdate', 'fill_profile_and_submit', 'click_email_signup_button', 'wait_for_sso_cookie', 'fill_code_and_submit', 'build_profile', 'cleanup_runtime_memory', 'open_signup_page', 'stop_browser', 'encode_grpc_nsfw_settings', 'restart_browser', 'has_profile_form', 'update_nsfw_settings', 'refresh_active_page', 'check_imagine_capability', 'browser_engine', 'browser_runtime'}
 # 注意：grok_register_ttk 会用 _make_compat_proxy 把本模块的同名函数包装成
 # 转发代理，再经 bind_runtime 把整个命名空间注回这里。凡是会被转发的名字
 # 都必须列在 _OWN_NAMES 里，否则 bind_runtime 会用「指向本模块的代理」覆盖
@@ -449,7 +450,7 @@ def start_browser(log_callback=None, use_proxy=True):
                             log_callback("[*] 已按代理实际出口对齐时区: %s" % zone)
                 except Exception:
                     pass
-            engine = browser_engine()
+            engine = browser_runtime.browser_engine()
             options = create_browser_options(browser_proxy=browser_proxy)
             if engine == "camoufox":
                 # Camoufox（加固版 Firefox，Juggler 协议 + 指纹伪造）能拿到
@@ -1360,17 +1361,68 @@ def _try_solve_turnstile_via_solver(log_callback=None):
 
     sitekey = _resolve_turnstile_sitekey(log_callback)
 
-    # 路径 1：页内自建组件 + 点击（不依赖外部服务）
+    # 路径 1：配置了打码服务（含本地 Camoufox solver）时优先调用
+    settings = captcha_solver.settings_from_config()
+    if settings:
+        if log_callback:
+            target = settings.get("api_base") or "默认端点"
+            log_callback(f"[*] 触发打码求解（{target}）...")
+        try:
+            captcha_solver.sync_solver_proxy(log=log_callback)
+        except Exception:
+            pass
+        try:
+            result = captcha_solver.solve_and_inject(
+                page,
+                settings["api_key"],
+                log=log_callback,
+                api_base=settings["api_base"],
+                timeout_sec=settings["timeout_sec"],
+                sitekey=settings.get("sitekey") or sitekey or "",
+            )
+        except Exception as exc:
+            if log_callback:
+                log_callback(f"[*] 打码异常，继续被动等待: {str(exc)[:100]}")
+            return False
+        if result.get("ok"):
+            if log_callback:
+                log_callback(
+                    f"[*] 打码已解出并注入（token {int(result.get('token_len') or 0)} 字符）"
+                )
+                if not result.get("ua_matched", True):
+                    log_callback("[!] 打码 UA 与浏览器不一致，token 可能不被接受")
+            token_val = result.get("token") or (_read_turnstile_state() or {}).get("token") or ""
+            if token_val:
+                try:
+                    res = captcha_solver.activate_turnstile_bridge(page, token_val)
+                    if log_callback:
+                        log_callback(f"[*] 打码 token 已桥接到 React bridge: {res}")
+                except Exception as exc:
+                    if log_callback:
+                        log_callback(f"[!] 打码 token 桥接异常: {exc}")
+                try:
+                    f_res = inject_turnstile_token_into_react(token_val, log_callback)
+                    if log_callback:
+                        log_callback(f"[*] React Fiber onToken 注入结果: {f_res}")
+                except Exception as exc:
+                    if log_callback:
+                        log_callback(f"[!] React Fiber 注入异常: {exc}")
+            return True
+        if log_callback:
+            log_callback(f"[*] 打码未成功，继续被动等待: {result.get('reason') or '未知原因'}")
+        return False
+
+    # 路径 2：未配置打码时的备用方案：页内自建组件 + 点击
     if sitekey:
         if log_callback:
-            log_callback("[*] 尝试页内自建 Turnstile 组件求解...")
+            log_callback("[*] 未配置打码服务，尝试页内自建 Turnstile 组件求解...")
         token = ""
         try:
             token = captcha_solver.solve_turnstile_in_page(
                 page,
                 sitekey,
                 log=log_callback,
-                timeout_sec=50,
+                timeout_sec=12,
             )
         except Exception as exc:
             if log_callback:
@@ -1384,57 +1436,14 @@ def _try_solve_turnstile_via_solver(log_callback=None):
                 captcha_solver.activate_turnstile_bridge(page, token)
             except Exception:
                 pass
+            try:
+                inject_turnstile_token_into_react(token, log_callback)
+            except Exception:
+                pass
             if log_callback:
                 log_callback("[*] 页内 Turnstile 求解成功并已桥接到 React state")
             return True
 
-    # 路径 2：外部打码平台 / 本地 solver
-    settings = captcha_solver.settings_from_config()
-    if not settings:
-        return False
-    if log_callback:
-        target = settings.get("api_base") or "默认端点"
-        log_callback(f"[*] 页内求解未成功，改用打码过盾（{target}）")
-    # Cloudflare 会核对 token 与提交请求的出口 IP：solver 走本机 IP 而注册
-    # 走住宅代理时，token 能注入但服务端拒绝，最终卡在拿不到 sso cookie。
-    # 所以打码前把当前租约代理同步给 solver。
-    try:
-        captcha_solver.sync_solver_proxy(log=log_callback)
-    except Exception:
-        pass
-    try:
-        result = captcha_solver.solve_and_inject(
-            page,
-            settings["api_key"],
-            log=log_callback,
-            api_base=settings["api_base"],
-            timeout_sec=settings["timeout_sec"],
-            sitekey=settings.get("sitekey") or sitekey or "",
-        )
-    except Exception as exc:
-        if log_callback:
-            log_callback(f"[*] 打码异常，继续被动等待: {str(exc)[:100]}")
-        return False
-    if result.get("ok"):
-        if log_callback:
-            log_callback(
-                f"[*] 打码已解出并注入（token {int(result.get('token_len') or 0)} 字符）"
-            )
-            if not result.get("ua_matched", True):
-                log_callback("[!] 打码 UA 与浏览器不一致，token 可能不被接受")
-        # 打码只往 input 里写值，而 x.ai 的提交守卫读的是 React state，
-        # 所以还要把 token 桥接给 React 组件的 onToken。
-        try:
-            live = (_read_turnstile_state() or {}).get("token") or ""
-            if live:
-                captcha_solver.activate_turnstile_bridge(page, live)
-                if log_callback:
-                    log_callback("[*] 打码 token 已桥接到 React state")
-        except Exception:
-            pass
-        return True
-    if log_callback:
-        log_callback(f"[*] 打码未成功，继续被动等待: {result.get('reason') or '未知原因'}")
     return False
 
 
@@ -1454,6 +1463,8 @@ def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
     try:
         import captcha_solver as _cs
         solver_after = _cs.auto_wait_sec()
+        if browser_runtime.browser_engine() == "camoufox":
+            solver_after = 0.0
     except Exception:
         solver_after = 10.0
     solver_attempted = False
@@ -1476,6 +1487,11 @@ def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
             if not in_page_attempted:
                 in_page_attempted = True
                 if _try_solve_turnstile_via_solver(log_callback):
+                    st = _read_turnstile_state()
+                    if st.get("token"):
+                        if log_callback:
+                            log_callback(f"[*] Cloudflare 人机验证已完成，token长度={len(st['token'])}")
+                        return st["token"]
                     last_log_at = 0.0
                     last_state = None
                     continue
@@ -1502,13 +1518,23 @@ def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
         # 给 Cloudflare 自动完成的机会；超过阈值仍无 token 才上打码。
         if (not solver_attempted) and (now - started) >= solver_after:
             solver_attempted = True
-            _try_solve_turnstile_via_solver(log_callback)
+            if _try_solve_turnstile_via_solver(log_callback):
+                st = _read_turnstile_state()
+                if st.get("token"):
+                    if log_callback:
+                        log_callback(f"[*] Cloudflare 人机验证已完成，token长度={len(st['token'])}")
+                    return st["token"]
             last_log_at = 0.0
             last_state = None
             continue
 
         sleep_with_cancel(min(1.0, max(deadline - now, 0.0)), cancel_callback)
 
+    final_st = _read_turnstile_state()
+    if final_st.get("token"):
+        if log_callback:
+            log_callback(f"[*] Cloudflare 人机验证已完成，token长度={len(final_st['token'])}")
+        return final_st["token"]
     raise Exception("Turnstile 验证超时")
 
 
@@ -1581,11 +1607,17 @@ def build_profile():
 _REACT_ONTOKEN_JS = r"""
 try {
   const token = %s;
-  function fiberKey(el) {
+  function targetOf(el) {
     if (!el) return null;
+    return el.wrappedJSObject || el;
+  }
+  function fiberKey(el) {
+    const t = targetOf(el);
+    if (!t) return null;
     // React attaches __reactFiber$<random> as a NON-enumerable own property,
     // so Object.keys() never sees it — getOwnPropertyNames() is required.
-    for (const name of Object.getOwnPropertyNames(el)) {
+    // On Firefox (Camoufox), expando properties sit on wrappedJSObject.
+    for (const name of Object.getOwnPropertyNames(t)) {
       if (name.indexOf('__reactFiber$') === 0) return name;
       if (name.indexOf('__reactInternalInstance$') === 0) return name;
     }
@@ -1596,15 +1628,16 @@ try {
   // input 在主文档里可能根本不存在，从它向上爬是走不到 React 树的，所以改为
   // 从根 fiber 出发做一次有界 BFS，遍历整棵树找 onToken。
   function rootFiberOf(el) {
-    if (!el) return null;
-    for (const name of Object.getOwnPropertyNames(el)) {
-      if (name.indexOf('__reactContainer$') === 0) return el[name];
-      if (name.indexOf('__reactFiber$') === 0) return el[name];
-      if (name.indexOf('__reactInternalInstance$') === 0) return el[name];
+    const t = targetOf(el);
+    if (!t) return null;
+    for (const name of Object.getOwnPropertyNames(t)) {
+      if (name.indexOf('__reactContainer$') === 0) return t[name];
+      if (name.indexOf('__reactFiber$') === 0) return t[name];
+      if (name.indexOf('__reactInternalInstance$') === 0) return t[name];
     }
     return null;
   }
-  const hosts = [document.querySelector('#root'), document.body, document.documentElement]
+  const hosts = [document.querySelector('form'), document.querySelector('#root'), document.body, document.documentElement]
     .filter(Boolean);
   let rootFiber = null;
   for (const host of hosts) {
@@ -1720,7 +1753,7 @@ def _publish_solver_token_to_page_state(log_callback=None):
     return inject_turnstile_token_into_react(token, log_callback)
 
 
-def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None):
+def fill_profile_and_submit(timeout=180, log_callback=None, cancel_callback=None):
     given_name, family_name, password = build_profile()
     deadline = time.time() + timeout
     form_filled_once = False
@@ -1810,12 +1843,14 @@ return 'filled-no-submit';
             TURNSTILE_WAITING,
             TURNSTILE_FAILED,
         }:
-            remaining = max(deadline - time.time(), 0.0)
-            getTurnstileToken(
+            remaining = max(deadline - time.time(), 60.0)
+            got = getTurnstileToken(
                 log_callback=log_callback,
                 cancel_callback=cancel_callback,
                 timeout=remaining,
             )
+            if got:
+                deadline = max(deadline, time.time() + 60.0)
             continue
 
         submit_state = page.run_js(
@@ -1858,6 +1893,7 @@ return 'ready-to-submit';
             # it to React state as well, otherwise the submit guard sees no
             # token and silently refuses to POST (see _REACT_ONTOKEN_JS).
             _publish_solver_token_to_page_state(log_callback)
+            sleep_with_cancel(0.8, cancel_callback)
             submit_state = page.run_js(
                 r"""
 function isVisible(node) {
@@ -1956,6 +1992,7 @@ return titleHit ? 'final-page' : 'not-final-page';
                     # 过期，首次提交若因 React state 未拿到 token 而失败，重试时
                     # 必须重新喂给 onToken，否则点多少次都不会发出注册请求。
                     _publish_solver_token_to_page_state(log_callback)
+                    sleep_with_cancel(0.8, cancel_callback)
 
                     retried = page.run_js(
                         r"""

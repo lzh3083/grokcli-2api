@@ -329,41 +329,54 @@ def solve_turnstile_in_page(page, sitekey, log=None, timeout_sec=45):
 def activate_turnstile_bridge(page, token):
     """把 token 喂给 x.ai 的 React Turnstile 组件（写入它的 onToken state）。
 
-    x.ai 通过 ``<script src=".../turnstile/v0/api.js?onload=XXXX">`` 加载
-    Turnstile，脚本执行后会调用 ``window.XXXX()`` 把 API 交给 React Context；
-    组件再调 ``turnstile.render(el, {sitekey, callback})``，callback 即 onToken，
-    最终写进提交守卫读的那个 React state。
+    x.ai 通过 ``<script src=".../api.js?onload=XXXX">`` 加载 Turnstile，脚本执行后
+    调 ``window.XXXX()`` 把 API 交给 React Context，组件再调
+    ``turnstile.render(el, {sitekey, callback})``，callback 即 onToken。
 
-    在 accounts.x.ai + Camoufox 下脚本体不执行、``window.XXXX`` 永不调用、
-    ``window.turnstile`` 永不出现，于是 onToken 永不触发。这里手动补齐这条链路：
-    调用 x.ai 的 onload 回调 + 触发垫片 render（垫片会用 __solverToken 调 callback）。
+    实测 accounts.x.ai 上定义 ``window.XXXX`` 的那段 x.ai 内联脚本同样被 CSP 拦下
+    不执行，所以 ``window.XXXX`` 恒为 undefined，无法靠调用它补齐链路。但兼容层
+    注入的 ``window.turnstile`` 垫片比页面任何脚本都早，React Provider 能正常拿到
+    它，组件也确实调用了垫片的 ``render`` —— 垫片把每次 render 的 callback 记在
+    ``window.__g2aPendingCallbacks``。这里设置 token 后统一回灌，React 的 onToken
+    就能拿到 token 并写进提交守卫读的那个 state。
     """
     native = getattr(page, "native", None) or page
     script = """(token) => {
     window.__solverToken = token;
-    const out = { onloadCalled: null, renderCalled: false, errors: [] };
-    const names = [];
+    const out = {
+        renderCalls: window.__g2aRenderCalls || 0,
+        pending: (window.__g2aPendingCallbacks || []).length,
+        onloadCalled: null,
+        fired: 0,
+        errors: []
+    };
+    // 1) 回灌垫片记录的 render callback —— 这就是 React 组件的 onToken
     try {
+        const cbs = window.__g2aPendingCallbacks || [];
+        for (const cb of cbs) {
+            try { cb(token); out.fired += 1; } catch (e) { out.errors.push('cb:' + String(e).slice(0, 60)); }
+        }
+    } catch (e) { out.errors.push('flush:' + e); }
+    // 2) 若 x.ai 的 onload 回调恰好存在（某些环境下会执行），也调用一次
+    try {
+        const names = [];
         document.querySelectorAll('script[src*="challenges.cloudflare.com/turnstile"]').forEach(s => {
             const m = /[?&]onload=([A-Za-z0-9_$]+)/.exec(s.src || '');
             if (m) names.push(m[1]);
         });
-    } catch (e) { out.errors.push('scan:' + e); }
-    for (const n of names) {
-        try {
+        for (const n of names) {
             if (typeof window[n] === 'function') { window[n](); out.onloadCalled = n; break; }
-        } catch (e) { out.errors.push('onload:' + n + ':' + e); }
-    }
+        }
+    } catch (e) { out.errors.push('onload:' + e); }
+    // 3) 再触发一次垫片 render，兜住"组件尚未 render"的情况
     try {
         const ts = window.turnstile;
         if (ts && typeof ts.render === 'function') {
-            let cbFired = false;
             ts.render(window.__g2aWidget || document.createElement('div'), {
                 sitekey: '',
-                callback: function (t) { cbFired = !!t; }
+                callback: function () {}
             });
             out.renderCalled = true;
-            out.cbFired = cbFired;
         }
     } catch (e) { out.errors.push('render:' + e); }
     return JSON.stringify(out);
@@ -500,12 +513,15 @@ def solve_and_inject(page, client_key, log=None, api_base="", timeout_sec=None,
             logger("Turnstile UA 不一致：解题=%s 浏览器=%s" % (expected_ua[:50], actual[:50]))
 
     result = inject_turnstile_token(page, token)
+    bridge_res = activate_turnstile_bridge(page, token)
     ok = int(result.get("filled") or 0) > 0 or int(result.get("called") or 0) > 0
     return {
         "ok": ok,
+        "token": token,
         "reason": "" if ok else "token 已取得但未找到可注入的目标元素",
         "token_len": len(token),
         "ua_matched": ua_matched,
+        "bridge": bridge_res,
     }
 
 def current_registration_proxy():

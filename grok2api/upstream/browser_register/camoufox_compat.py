@@ -241,6 +241,64 @@ class _Rect:
 # ───────────────────────────── 页面包装 ─────────────────────────────
 
 
+class _PageWaiter:
+    """DrissionPage 风格 ``page.wait``。
+
+    DrissionPage 把 ``wait`` 做成对象（``page.wait.doc_loaded()``），而兼容层最初
+    把它实现成普通方法 ``wait(seconds)``，于是生产流程一进门就炸在
+    ``'function' object has no attribute 'doc_loaded'``。这里两种用法都支持：
+    ``page.wait.doc_loaded()`` 与 ``page.wait(2)``。
+    """
+
+    def __init__(self, page: "CamoufoxPage"):
+        self._page = page
+
+    def __call__(self, seconds: float = 0):
+        time.sleep(max(float(seconds or 0), 0.0))
+        return self
+
+    def doc_loaded(self, timeout: float = 30, **kwargs):
+        """等待文档加载完成（对应 Playwright 的 domcontentloaded）。"""
+        try:
+            self._page.native.wait_for_load_state(
+                "domcontentloaded", timeout=max(float(timeout or 30), 1.0) * 1000
+            )
+        except Exception:
+            pass
+        return True
+
+    def load_start(self, timeout: float = 30, **kwargs):
+        """等待页面开始加载；Playwright 无等价原语，退化为 doc_loaded。"""
+        return self.doc_loaded(timeout=timeout)
+
+    def ele_displayed(self, locator, timeout: float = 10, **kwargs):
+        try:
+            self._page.native.locator(str(locator)).first.wait_for(
+                state="visible", timeout=max(float(timeout or 10), 0.1) * 1000
+            )
+            return True
+        except Exception:
+            return False
+
+    def ele_deleted(self, locator, timeout: float = 10, **kwargs):
+        try:
+            self._page.native.locator(str(locator)).first.wait_for(
+                state="detached", timeout=max(float(timeout or 10), 0.1) * 1000
+            )
+            return True
+        except Exception:
+            return False
+
+    def title_change(self, text: str = "", timeout: float = 10, **kwargs):
+        return True
+
+    def url_change(self, text: str = "", timeout: float = 10, **kwargs):
+        return True
+
+    def download_begin(self, timeout: float = 10, **kwargs):
+        return False
+
+
 class CamoufoxPage:
     """模拟 DrissionPage 的 ``ChromiumTab``。"""
 
@@ -381,8 +439,14 @@ class CamoufoxPage:
         except Exception:
             pass
 
-    def wait(self, seconds: float):
-        time.sleep(float(seconds or 0))
+    @property
+    def wait(self):
+        """DrissionPage 兼容：``page.wait.doc_loaded()`` 与 ``page.wait(2)`` 都可用。"""
+        waiter = getattr(self, "_waiter", None)
+        if waiter is None:
+            waiter = _PageWaiter(self)
+            self._waiter = waiter
+        return waiter
 
     def screenshot(self, path: str = "", full_page: bool = False):
         try:
@@ -638,58 +702,92 @@ _TURNSTILE_SHIM_JS = r"""
     if (window.__g2aTurnstileShim) { return; }
     window.__g2aTurnstileShim = true;
     var _real = null;
+
+    function _recordCallback(opts) {
+        if (!opts) return;
+        window.__g2aRenderCalls = (window.__g2aRenderCalls || 0) + 1;
+        if (typeof opts.callback === 'function') {
+            window.__g2aPendingCallbacks = window.__g2aPendingCallbacks || [];
+            if (window.__g2aPendingCallbacks.indexOf(opts.callback) < 0) {
+                window.__g2aPendingCallbacks.push(opts.callback);
+            }
+            var t = window.__solverToken;
+            if (t) {
+                setTimeout(function () { try { opts.callback(t); } catch (e) {} }, 0);
+            }
+        }
+        if (typeof opts['error-callback'] === 'function') {
+            window.__g2aErrorCallbacks = window.__g2aErrorCallbacks || [];
+            window.__g2aErrorCallbacks.push(opts['error-callback']);
+        }
+    }
+
+    function _wrapReal(r) {
+        if (!r || r.__g2aHooked) return r;
+        r.__g2aHooked = true;
+        try {
+            var origRender = r.render;
+            r.render = function (target, opts) {
+                if (target) { window.__g2aWidget = target; }
+                _recordCallback(opts);
+                try {
+                    return origRender ? origRender.apply(r, arguments) : 'g2a-mock-widget';
+                } catch (e) {
+                    return 'g2a-mock-widget';
+                }
+            };
+            var origGetResp = r.getResponse;
+            r.getResponse = function (widget) {
+                var t = window.__solverToken;
+                if (t) { return t; }
+                try { return origGetResp ? origGetResp.call(r, widget) : ''; } catch (e) { return ''; }
+            };
+            var origExec = r.execute;
+            r.execute = function (target, opts) {
+                if (target) { window.__g2aWidget = target; }
+                _recordCallback(opts);
+                try {
+                    return origExec ? origExec.apply(r, arguments) : undefined;
+                } catch (e) {
+                    return undefined;
+                }
+            };
+        } catch (e) {}
+        return r;
+    }
+
     function _mock() {
         return {
             getResponse: function () { return window.__solverToken || ''; },
             render: function (target, opts) {
-                // x.ai 的 React Turnstile 组件会调 render({sitekey, callback})，
-                // 其 callback 就是写入 React state 的 onToken。真实脚本不执行时
-                // 这个 render 永远不会被调用，onToken 也就永不触发；这里主动把
-                // 外部解出的 token 喂给 callback，让 React state 拿到有效 token。
-                try {
-                    var t = window.__solverToken;
-                    if (t && opts && typeof opts.callback === 'function') {
-                        setTimeout(function () { try { opts.callback(t); } catch (e) {} }, 0);
-                    }
-                } catch (e) {}
+                if (target) { window.__g2aWidget = target; }
+                _recordCallback(opts);
                 return 'g2a-mock-widget';
             },
             reset: function () {},
             remove: function () {},
             ready: function (cb) { if (typeof cb === 'function') { try { cb(); } catch (e) {} } },
             execute: function (target, opts) {
-                try {
-                    var t = window.__solverToken;
-                    if (t && opts && typeof opts.callback === 'function') {
-                        setTimeout(function () { try { opts.callback(t); } catch (e) {} }, 0);
-                    }
-                } catch (e) {}
+                if (target) { window.__g2aWidget = target; }
+                _recordCallback(opts);
             },
             isExecuted: function () { return !!window.__solverToken; }
         };
     }
+
     try {
         Object.defineProperty(window, 'turnstile', {
             configurable: true,
             enumerable: true,
             get: function () {
                 if (_real) {
-                    if (!_real.__g2aHooked) {
-                        _real.__g2aHooked = true;
-                        try {
-                            var orig = _real.getResponse;
-                            _real.getResponse = function (widget) {
-                                var t = window.__solverToken;
-                                if (t) { return t; }
-                                try { return orig ? orig.call(_real, widget) : ''; } catch (e) { return ''; }
-                            };
-                        } catch (e) {}
-                    }
-                    return _real;
+                    return _wrapReal(_real);
                 }
                 return _mock();
             },
-            set: function (v) { _real = v; }
+            set: function (v) {
+                _real = _wrapReal(v);
+            }
         });
     } catch (e) {}
 })();
