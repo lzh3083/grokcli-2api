@@ -4,6 +4,24 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.0.6] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **防账号降智与全生命周期信誉增强体系 (Anti-Degrade & Warm-up Lifecycle)**：
+  - **注册行为拟人化注入 (Human Entropy)**：
+    - 页面视读等待：访问注册首页后加入随机 1.2～2.5 秒人类停留，模拟阅读页面。
+    - 验证码接收拟人化延时：收到邮件验证码后加入 1.8～3.2 秒切屏/视读等待，彻底告别“0秒光速写入”的机器人特征。
+    - 提交资料前人工核对微动：资料填写完毕后增加 1.0～2.2 秒随机停顿再提交。
+  - **新账号破冰日常会话 (Warm-up Conversation)**：
+    - 注册成功提取 SSO 后，在入库前自动对 grok.com 发起首轮日常轻量问答（`Hi, how are you today?`）。
+    - 使得账号在 x.ai 后台首次落地即建立合法真实的 Conversation 历史上下文，脱离“初生空白号”高风险特征。
+  - **降智自动检测与隔离闭环 (Quality Probe Enforcement)**：
+    - 默认启用深度思考推理探测，以 `reasoning_tokens` 为金标准判定账号健康度。
+    - 发现无思考（`reasoning_tokens=0`）的账号自动打标 `disabled` 移出活跃轮询池，确保下游大模型请求永远输出高质量推理内容。
+
+---
+
 ## [v2.0.5] - 2026-10-02
 
 ### 🚀 重点功能与重大更新 (Major Improvements)

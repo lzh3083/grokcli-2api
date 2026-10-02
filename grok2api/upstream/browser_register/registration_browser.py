@@ -663,6 +663,11 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     sleep_with_cancel(2, cancel_callback)
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
+    # 拟人化：打开注册页后模拟人类视读停留
+    human_read_sec = random.uniform(1.2, 2.5)
+    if log_callback:
+        log_callback(f"[拟人化] 视读页面停留 ({human_read_sec:.1f}s)...")
+    sleep_with_cancel(human_read_sec, cancel_callback)
     click_email_signup_button(
         log_callback=log_callback, cancel_callback=cancel_callback
     )
@@ -1005,6 +1010,13 @@ return false;
     if not code:
         raise Exception("获取验证码失败")
     clean_code = str(code).replace("-", "").strip()
+
+    # 拟人化：收到验证码后模拟人类切屏/看邮件延时，避免0秒光速写入
+    view_code_delay = random.uniform(1.8, 3.2)
+    if log_callback:
+        log_callback(f"[拟人化] 模拟查收验证码视读延时 ({view_code_delay:.1f}s)...")
+    sleep_with_cancel(view_code_delay, cancel_callback)
+
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -1894,6 +1906,11 @@ return 'ready-to-submit';
             # token and silently refuses to POST (see _REACT_ONTOKEN_JS).
             _publish_solver_token_to_page_state(log_callback)
             sleep_with_cancel(0.8, cancel_callback)
+            # 拟人化：提交前停顿与微动，模拟人工核对资料
+            pre_submit_delay = random.uniform(1.0, 2.2)
+            if log_callback:
+                log_callback(f"[拟人化] 提交注册前模拟人工核对 ({pre_submit_delay:.1f}s)...")
+            sleep_with_cancel(pre_submit_delay, cancel_callback)
             submit_state = page.run_js(
                 r"""
 function isVisible(node) {

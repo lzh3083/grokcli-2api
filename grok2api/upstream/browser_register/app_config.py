@@ -158,6 +158,10 @@ DEFAULT_CONFIG = {
     # 看 usage.completion_tokens_details.reasoning_tokens 才能发现。检测同步
     # 跑在注册流程内，每个账号约 6~15 秒。判为降智的账号保留记录但暂停轮询。
     "quality_auto_probe": True,
+    # 新注册账号冷却静置观察期（秒），默认 0（立即入池），可设如 21600 (6小时)
+    "account_cooldown_sec": 0,
+    # 注册完成后是否执行 1 轮破冰日常会话以生成合法会话上下文
+    "warmup_conversation_enabled": True,
     # 降智测试可疑阈值（低于此推理 token 数量视为可疑）。
     "quality_soft_threshold": 50,
     # 注册会话内是否实测 Grok Imagine 生图能力。默认关闭：这个探测要真的

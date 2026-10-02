@@ -327,6 +327,35 @@ def run_browser_registration(
             except Exception as nsfw_exc:
                 _log_cb(f"[!] NSFW 开启异常: {nsfw_exc}")
 
+        # E. 破冰养号会话 (Warm-up Conversation: 模拟真实用户首轮日常闲聊)
+        if cfg.get("warmup_conversation_enabled", True):
+            _log_cb("[*] 正在执行新账号破冰对话 (Warm-up Session)...")
+            try:
+                from curl_cffi import requests as c_req
+                warmup_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    "Cookie": f"sso={sso}; sso-rw={sso}",
+                    "Origin": "https://grok.com",
+                    "Referer": "https://grok.com/",
+                    "Content-Type": "application/json",
+                }
+                warmup_proxies = {"https": active_proxy} if active_proxy else None
+                # 发送一轮轻量常规问候，激活会话树
+                warm_res = c_req.post(
+                    "https://grok.com/rest/app-chat/conversations/new",
+                    headers=warmup_headers,
+                    json={"modelName": "grok-3", "message": "Hi, how are you today?"},
+                    proxies=warmup_proxies,
+                    timeout=15,
+                    impersonate="chrome124",
+                )
+                if warm_res.status_code in (200, 201):
+                    _log_cb("[+] 破冰对话创建成功，账号已沉淀合法会话上下文")
+                else:
+                    _log_cb(f"[*] 破冰对话响应码: {warm_res.status_code} (不影响入库)")
+            except Exception as w_exc:
+                _log_cb(f"[*] 破冰会话跳过: {str(w_exc)[:90]}")
+
     finally:
         # Always reclaim browser process and memory after each registration
         try:
