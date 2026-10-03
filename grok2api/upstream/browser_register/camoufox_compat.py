@@ -844,7 +844,7 @@ class CamoufoxBrowser:
         except Exception:
             pass
 
-        # 流量节省：在 Context 级拦截字体、视频、遥测打点及纯装饰图片
+        # 流量与反爬平衡：仅拦截大体积多媒体与纯外部统计，绝不拦截字体和图片以保护 Cloudflare JSD 指纹
         try:
             def _traffic_filter(route):
                 try:
@@ -852,34 +852,25 @@ class CamoufoxBrowser:
                     url = req.url.lower()
                     rt = req.resource_type
 
-                    # 1. 核心白名单：Cloudflare 验证与 Turnstile 必须放行
-                    if "challenges.cloudflare.com" in url or "cloudflare" in url or "turnstile" in url:
+                    # 1. 核心白名单：Cloudflare、Turnstile、x.ai 核心业务绝对放行
+                    if "challenges.cloudflare.com" in url or "cloudflare" in url or "turnstile" in url or "accounts.x.ai" in url or "auth.x.ai" in url:
                         route.continue_()
                         return
 
-                    # 2. 遥测、打点与分析上报（拦截省流）
+                    # 2. 外部纯遥测与重型分析埋点（安全拦截）
                     telemetry = (
                         "statsig.com",
                         "datadoghq.com",
                         "sentry.io",
                         "google-analytics.com",
                         "googletagmanager.com",
-                        "analytics.x.ai",
                     )
                     if any(t in url for t in telemetry):
                         route.abort()
                         return
 
-                    # 3. 字体与多媒体文件（无头注册完全不依赖，拦截省流数兆）
-                    if rt in ("font", "media") or any(
-                        url.endswith(ext)
-                        for ext in (".woff2", ".woff", ".ttf", ".otf", ".mp4", ".webm", ".mp3")
-                    ):
-                        route.abort()
-                        return
-
-                    # 4. 纯装饰性大图片（Next.js 图标、横幅、SVG 动画）
-                    if rt == "image":
+                    # 3. 大体积视频/音频媒体流（页面无此类内容，拦截防意外浪费）
+                    if rt == "media" or any(url.endswith(ext) for ext in (".mp4", ".webm", ".mp3", ".ogg")):
                         route.abort()
                         return
 
