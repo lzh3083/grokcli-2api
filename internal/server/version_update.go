@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	defaultGHReleaseRepo = "HM2899/grokcli-2api"
-	defaultGHCRImage     = "ghcr.io/hm2899/grokcli-2api"
+	defaultGHReleaseRepo = "lzh3083/grokcli-2api"
+	defaultGHCRImage     = "ghcr.io/lzh3083/grokcli-2api"
 	versionCacheTTL      = 10 * time.Minute
 	updateRequestFile    = "update.request"
 	updateStatusFile     = "update.status"
@@ -346,6 +346,106 @@ func serveVersionUpdate(w http.ResponseWriter, r *http.Request, options Options)
 	}
 }
 
+func localChangelogNotes(ver string) (string, string) {
+	ver = strings.TrimPrefix(strings.TrimSpace(ver), "v")
+	paths := []string{"/app/CHANGELOG.md", "CHANGELOG.md", "../CHANGELOG.md"}
+	var content []byte
+	for _, p := range paths {
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			content = b
+			break
+		}
+	}
+	if len(content) == 0 {
+		return fmt.Sprintf("v%s 最新稳定版", ver), "已运行当前最新版本。"
+	}
+	text := string(content)
+	target := "## [v" + ver + "]"
+	idx := strings.Index(text, target)
+	if idx == -1 {
+		target = "## [" + ver + "]"
+		idx = strings.Index(text, target)
+	}
+	if idx == -1 {
+		return fmt.Sprintf("v%s 最新稳定版", ver), "已运行当前最新版本。"
+	}
+	sub := text[idx:]
+	lines := strings.Split(sub, "\n")
+	var notesLines []string
+	title := ""
+	for i, line := range lines {
+		if i == 0 {
+			continue // 跳过标题行 ## [vX.Y.Z] - YYYY-MM-DD
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## [") {
+			break
+		}
+		if trimmed == "---" && len(notesLines) > 0 {
+			break
+		}
+		if strings.HasPrefix(trimmed, "### ") && title == "" {
+			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "### "))
+		}
+		notesLines = append(notesLines, line)
+	}
+	if title == "" {
+		title = fmt.Sprintf("v%s 最新稳定版", ver)
+	}
+	notes := strings.TrimSpace(strings.Join(notesLines, "\n"))
+	if notes == "" {
+		notes = "已运行当前最新版本。"
+	}
+	return title, notes
+}
+
+func fetchGitHubLatestTag(ctx context.Context, repo string) (tag, htmlURL string, err error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return "", "", errors.New("empty release repo")
+	}
+	api := "https://api.github.com/repos/" + repo + "/tags?per_page=5"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "grokcli-2api/"+buildinfo.Version)
+	if tok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	} else if tok := strings.TrimSpace(os.Getenv("GROK2API_GITHUB_TOKEN")); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("github tags %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tagList []map[string]any
+	if err := json.Unmarshal(body, &tagList); err != nil || len(tagList) == 0 {
+		return "", "", errors.New("no tags found")
+	}
+	highest := ""
+	for _, item := range tagList {
+		t := strings.TrimSpace(stringValue(item["name"]))
+		if t == "" {
+			continue
+		}
+		if highest == "" || versionLess(strings.TrimPrefix(highest, "v"), strings.TrimPrefix(t, "v")) {
+			highest = t
+		}
+	}
+	if highest == "" {
+		return "", "", errors.New("empty tag")
+	}
+	return highest, "https://github.com/" + repo + "/releases/tag/" + highest, nil
+}
+
 func checkLatestVersion(ctx context.Context, force bool) versionCheckResult {
 	versionCacheMu.Lock()
 	defer versionCacheMu.Unlock()
@@ -355,33 +455,56 @@ func checkLatestVersion(ctx context.Context, force bool) versionCheckResult {
 		out.Source = "cache"
 		return out
 	}
+	repo := ghReleaseRepo()
 	out := versionCheckResult{
 		OK:      true,
 		Current: strings.TrimPrefix(buildinfo.Version, "v"),
 		Image:   ghcrImage(),
 		Source:  "github_releases",
 	}
-	latest, name, notes, url, err := fetchGitHubLatestRelease(ctx, ghReleaseRepo())
-	out.CheckedAt = now.Unix()
-	if err != nil {
-		out.OK = false
-		out.Error = err.Error()
-		out.Source = "error"
-		// keep last good cache if any
-		if versionCacheResult.Latest != "" {
-			cached := versionCacheResult
-			cached.Error = out.Error
-			cached.CheckedAt = out.CheckedAt
-			cached.Source = "cache_stale"
-			return cached
+	tag, name, notes, url, err := fetchGitHubLatestRelease(ctx, repo)
+	// 若 Release 不存在（404）或 Release 版本落后于本地当前版本，则尝试查 tags
+	if err != nil || tag == "" || versionLess(strings.TrimPrefix(tag, "v"), out.Current) {
+		if tTag, tURL, tErr := fetchGitHubLatestTag(ctx, repo); tErr == nil && tTag != "" {
+			if tag == "" || versionLess(strings.TrimPrefix(tag, "v"), strings.TrimPrefix(tTag, "v")) {
+				tag = tTag
+				url = tURL
+				name = ""
+				notes = ""
+				err = nil
+			}
 		}
-		return out
 	}
-	out.Latest = strings.TrimPrefix(latest, "v")
-	out.ReleaseName = name
-	out.ReleaseNotes = truncateRunes(notes, 800)
-	out.ReleaseURL = url
-	out.UpdateAvailable = versionLess(out.Current, out.Latest)
+	out.CheckedAt = now.Unix()
+	latestClean := strings.TrimPrefix(tag, "v")
+
+	// 自洽性保证：如果获取到的最新版本仍比当前版本低（或者为空/报错），说明本地当前构建已经是最新（或超前于远端）
+	if tag == "" || versionLess(latestClean, out.Current) {
+		out.OK = true
+		out.Latest = out.Current
+		out.UpdateAvailable = false
+		title, localNotes := localChangelogNotes(out.Current)
+		out.ReleaseName = title
+		out.ReleaseNotes = truncateRunes(localNotes, 800)
+		out.ReleaseURL = "https://github.com/" + repo + "/releases/tag/v" + out.Current
+		out.Source = "local_current"
+	} else {
+		out.OK = true
+		out.Latest = latestClean
+		out.ReleaseName = name
+		if strings.TrimSpace(notes) != "" {
+			out.ReleaseNotes = truncateRunes(notes, 800)
+		} else {
+			_, localNotes := localChangelogNotes(out.Latest)
+			out.ReleaseNotes = truncateRunes(localNotes, 800)
+		}
+		if out.ReleaseName == "" {
+			title, _ := localChangelogNotes(out.Latest)
+			out.ReleaseName = title
+		}
+		out.ReleaseURL = url
+		out.UpdateAvailable = versionLess(out.Current, out.Latest)
+	}
 	versionCacheAt = now
 	versionCacheResult = out
 	return out

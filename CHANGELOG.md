@@ -4,6 +4,18 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.0.10] - 2026-10-02
+
+### 🚀 重点功能与重大更新 (Major Improvements)
+
+- **修复版本检查与更新自洽展示逻辑 (Version Update Self-Consistency)**：
+  - **更新源对齐当前仓库**：默认 Release 检查仓库由原作者上游重定向至当前仓库 `lzh3083/grokcli-2api`，避免因拉取上游停滞版本（v2.0.4）导致最新版本倒退展示。
+  - **智能 Tags 回退机制**：当 GitHub Releases 接口未发布 Formal Release 时，自动调用 GitHub Tags 接口提取最新语义化版本（SemVer），精准获取实际发布的版本标签。
+  - **本地 CHANGELOG 智能解析**：当版本为最新或处于超前构建状态时，自动从系统内置 `CHANGELOG.md` 中提取当前版本的完整更新说明与亮点展示。
+  - **版本防降级逻辑兜底**：彻底修复“当前版本高、最新版本反显为旧版”的逻辑倒挂缺陷；当远端版本低于本地运行版本时，自动对齐当前版本为最新，确保管理后台展示自洽。
+
+---
+
 ## [v2.0.9] - 2026-10-02
 
 ### 🚀 重点功能与重大更新 (Major Improvements)
