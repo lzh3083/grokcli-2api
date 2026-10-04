@@ -972,13 +972,11 @@ func shellQuoteToken(s string, dialect shellDialect) string {
 		return s
 	}
 	_ = dialect
-	// Prefer double-quote with "" escape. Bash-style '\'' around tokens like
-	// 'rg -n' makes PowerShell treat the first token as a string literal (not a
-	// command) and then ParserError on the next quoted fragment.
-	if !strings.Contains(s, "\"") {
-		return "\"" + s + "\""
+	// POSIX single-quote: safest — avoids shell variable expansion and command execution.
+	if !strings.Contains(s, "'") {
+		return "'" + s + "'"
 	}
-	return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func flattenCommandParts(parts []any) []string {

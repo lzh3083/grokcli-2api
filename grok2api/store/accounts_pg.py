@@ -461,24 +461,25 @@ def list_account_summaries(
 
 
 def write_auth_map(data: dict[str, Any]) -> None:
-    """Replace full account set (import/export style)."""
+    """Upsert accounts from data without deleting rows not in data.
+
+    Previous implementation performed a full-table set-difference DELETE which
+    caused silent data loss when concurrent registration/import tasks inserted
+    new accounts between the snapshot read and the commit.  The new behaviour
+    only upserts incoming rows — callers that genuinely need to remove specific
+    accounts should use ``delete_account`` instead.
+    """
     if not enabled():
         return
     data = data if isinstance(data, dict) else {}
+    if not data:
+        return
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM accounts")
-            existing = {r[0] for r in cur.fetchall()}
-            incoming = set(data.keys())
-            # upsert all
             for aid, entry in data.items():
                 if not isinstance(entry, dict):
                     continue
                 _upsert_one(cur, str(aid), entry)
-            # delete removed
-            for aid in existing - incoming:
-                cur.execute("DELETE FROM accounts WHERE id = %s", (aid,))
-                cur.execute("DELETE FROM account_pool WHERE account_id = %s", (aid,))
         conn.commit()
     invalidate_auth_map_cache()
 

@@ -129,8 +129,10 @@ func (s *StreamAssembler) Feed(content, reasoning string, calls []ToolDelta) []s
 		}
 		// reasoning falls through to emitText below (live)
 	} else if s.toolsRequested && s.sawTool {
-		// After first tool, drop further text/reasoning for this turn (tool-only).
-		content, reasoning = "", ""
+		// After first tool, still emit text/reasoning — the model may include
+		// explanations or summaries alongside tool_use blocks.
+		// Previously this dropped all content which violated the Anthropic
+		// streaming spec where text and tool_use blocks can be interleaved.
 	}
 	if content != "" || reasoning != "" {
 		frames = append(frames, s.emitText(reasoning, content)...)
@@ -671,21 +673,13 @@ func (s *StreamAssembler) Finish(finishReason string, usage Usage) []string {
 			}
 		}
 	}
-	hasReady := false
-	for _, state := range s.tools {
-		if !state.stopped && state.name != "" && toolcall.CompleteJSON(state.arguments, state.name) {
-			hasReady = true
-			break
-		}
+	// Always emit held text before tools — the model may have produced
+	// explanatory text before the first tool_use and discarding it causes
+	// the client to miss important context.
+	for _, delta := range s.held {
+		frames = append(frames, s.emitText(delta.reasoning, delta.content)...)
 	}
-	if s.sawTool || hasReady {
-		s.held = nil
-	} else {
-		for _, delta := range s.held {
-			frames = append(frames, s.emitText(delta.reasoning, delta.content)...)
-		}
-		s.held = nil
-	}
+	s.held = nil
 	frames = append(frames, s.closeThinking()...)
 	frames = append(frames, s.closeText()...)
 	// force=true: after CoerceCompleteJSON, use CompleteJSON (not Strict) so

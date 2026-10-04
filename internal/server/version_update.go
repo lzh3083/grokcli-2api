@@ -10,12 +10,45 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/hm2899/grokcli-2api/internal/buildinfo"
 )
+
+var safeTagRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+var safeImageRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{0,255}$`)
+
+func sanitizeUpdateTag(tag string) (string, error) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return "latest", nil
+	}
+	tag = strings.TrimPrefix(tag, "v")
+	if tag == "" {
+		return "latest", nil
+	}
+	if !safeTagRe.MatchString(tag) {
+		return "", fmt.Errorf("invalid tag %q: must match [a-zA-Z0-9._-]", tag)
+	}
+	return tag, nil
+}
+
+func sanitizeUpdateImage(image string) (string, error) {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ghcrImage(), nil
+	}
+	if strings.ContainsAny(image, "\n\r\t'\"\\;|&$`!") {
+		return "", fmt.Errorf("invalid image %q: contains forbidden characters", image)
+	}
+	if !safeImageRe.MatchString(image) {
+		return "", fmt.Errorf("invalid image %q: must match registry/repo format", image)
+	}
+	return image, nil
+}
 
 const (
 	defaultGHReleaseRepo = "lzh3083/grokcli-2api"
@@ -260,23 +293,24 @@ func serveVersionUpdate(w http.ResponseWriter, r *http.Request, options Options)
 	if body == nil {
 		body = map[string]any{}
 	}
-	tag := strings.TrimSpace(stringValue(body["tag"]))
-	if tag == "" {
-		// default: latest from check
+	rawTag := strings.TrimSpace(stringValue(body["tag"]))
+	if rawTag == "" {
 		info := checkLatestVersion(r.Context(), true)
 		if info.Latest != "" {
-			tag = info.Latest
+			rawTag = info.Latest
 		} else {
-			tag = "latest"
+			rawTag = "latest"
 		}
 	}
-	tag = strings.TrimPrefix(tag, "v")
-	if tag == "" {
-		tag = "latest"
+	tag, err := sanitizeUpdateTag(rawTag)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": err.Error()})
+		return
 	}
-	image := strings.TrimSpace(stringValue(body["image"]))
-	if image == "" {
-		image = ghcrImage()
+	image, err := sanitizeUpdateImage(strings.TrimSpace(stringValue(body["image"])))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "detail": err.Error()})
+		return
 	}
 	mode, supported, hint := updateMode()
 	if !supported {
@@ -650,7 +684,7 @@ func runInContainerDockerUpdate(options Options, req updateRequest) {
 		"GROK2API_GHCR_IMAGE="+ghcrImage(),
 	)
 	if st, err := os.Stat(script); err == nil && !st.IsDir() {
-		cmd = exec.CommandContext(ctx, "sh", script, req.Tag, req.Image)
+		cmd = exec.CommandContext(ctx, "bash", script, req.Tag, req.Image)
 	} else {
 		// Inline fallback when script not packaged.
 		full := strings.TrimRight(req.Image, "/") + ":" + strings.TrimPrefix(req.Tag, "v")

@@ -167,8 +167,25 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 	}
 	// stickyMissID defers pin clear until a later account actually succeeds.
 	stickyMissID := ""
+	markedAccounts := make(map[string]bool)
+	mark := func(accountID string) {
+		s.markAttempt(ctx, accountID)
+		markedAccounts[accountID] = true
+	}
+	releaseMarkedExcept := func(keepID string) {
+		if s.PickObserver == nil {
+			return
+		}
+		for id := range markedAccounts {
+			if id == keepID {
+				continue
+			}
+			s.releasePick(ctx, id)
+			delete(markedAccounts, id)
+		}
+	}
 	for i, account := range accounts {
-		s.markAttempt(ctx, account.ID)
+		mark(account.ID)
 		attempt, err := OpenWithFailover(ctx, client, []grok.Account{account}, model, body, &CommitState{})
 		if err != nil {
 			// Intermediate + final losers: report so free-usage / 额度用完 bodies
@@ -180,7 +197,7 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 			}
 			// Retryable/non-retryable both continue within short chain until exhausted.
 			if i == len(accounts)-1 {
-				s.releaseChain(ctx, chain)
+				releaseMarkedExcept("")
 				if lastEmpty != nil {
 					return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep, AccountID: lastFailAccountID}, lastEmpty
 				}
@@ -194,11 +211,11 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 		_ = attempt.Body.Close()
 		if readErr != nil {
 			s.reportAccountFailure(attempt.Account.ID, model, readErr)
-			s.releaseChain(ctx, chain)
+			releaseMarkedExcept("")
 			return ChatResult{PreferAccount: prefer, FirstAccount: first, Fingerprint: fingerprint, Accounts: len(chain), Prep: prep, AccountID: attempt.Account.ID}, readErr
 		}
 		if !collector.emptyModelOutput() {
-			s.releaseChainExcept(ctx, chain, attempt.Account.ID)
+			releaseMarkedExcept(attempt.Account.ID)
 			failover := first != "" && attempt.Account.ID != first
 			// Only drop sticky pin once we know a different account produced live output.
 			if failover && stickyMissID != "" {
@@ -219,7 +236,7 @@ func (s *ChatService) CompleteWithResult(ctx context.Context, request ChatReques
 			stickyMissID = account.ID
 		}
 	}
-	s.releaseChain(ctx, chain)
+	releaseMarkedExcept("")
 	if lastEmpty == nil {
 		lastEmpty = &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 	}
@@ -342,7 +359,6 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 	for _, account := range primary {
 		opened, ok, err := openOne(account)
 		if ok {
-			s.releaseChainExcept(ctx, chain, opened.AccountID)
 			return opened, nil
 		}
 		if stickyFirst && shouldDropStickyPin(err) {
@@ -362,7 +378,6 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 			}
 			// Always try remaining accounts (parallel phase) before failing the request.
 			if len(rest) == 0 {
-				s.releaseChain(ctx, chain)
 				if lastEmpty != nil {
 					return meta, lastEmpty
 				}
@@ -376,7 +391,6 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 	// Race dials; first non-empty stream wins. Others are closed immediately.
 	// Caps concurrency to keep upstream load bounded (default chain is 4).
 	if len(rest) == 0 {
-		s.releaseChain(ctx, chain)
 		if lastEmpty == nil {
 			lastEmpty = &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 		}
@@ -399,7 +413,6 @@ func (s *ChatService) OpenStreamWithResult(ctx context.Context, request ChatRequ
 		// permanently orphan the conversation onto a random cold account next turn.
 	}
 
-	s.releaseChain(ctx, chain)
 	if lastEmpty == nil {
 		lastEmpty = &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 	}
@@ -444,8 +457,16 @@ func (s *ChatService) parallelFirstByteOpen(
 		n = maxWorkers
 		accounts = accounts[:maxWorkers]
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	type probeWorker struct {
+		ctx    context.Context
+		cancel context.CancelFunc
+	}
+	workers := make([]probeWorker, len(accounts))
+	for i := range accounts {
+		wCtx, wCancel := context.WithCancel(ctx)
+		workers[i] = probeWorker{ctx: wCtx, cancel: wCancel}
+		defer wCancel()
+	}
 
 	ch := make(chan raced, n)
 	var wg sync.WaitGroup
@@ -453,21 +474,22 @@ func (s *ChatService) parallelFirstByteOpen(
 		wg.Add(1)
 		go func(i int, account grok.Account) {
 			defer wg.Done()
-			s.markAttempt(ctx, account.ID)
-			attempt, err := OpenWithFailover(ctx, client, []grok.Account{account}, model, body, &CommitState{})
+			wCtx := workers[i].ctx
+			s.markAttempt(wCtx, account.ID)
+			attempt, err := OpenWithFailover(wCtx, client, []grok.Account{account}, model, body, &CommitState{})
 			if err != nil {
 				// Parallel loser / exhausted account — still classify free-usage text.
 				s.reportAccountFailure(account.ID, model, err)
-				s.releasePick(ctx, account.ID)
+				s.releasePick(wCtx, account.ID)
 				select {
 				case ch <- raced{err: err, idx: i}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 				return
 			}
 			// If we already lost the race, close immediately without peeking.
 			select {
-			case <-ctx.Done():
+			case <-wCtx.Done():
 				_ = attempt.Body.Close()
 				s.releasePick(context.Background(), account.ID)
 				return
@@ -477,10 +499,10 @@ func (s *ChatService) parallelFirstByteOpen(
 			if err != nil {
 				_ = attempt.Body.Close()
 				s.reportAccountFailure(account.ID, model, err)
-				s.releasePick(ctx, account.ID)
+				s.releasePick(wCtx, account.ID)
 				select {
 				case ch <- raced{err: err, idx: i}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 				return
 			}
@@ -488,10 +510,10 @@ func (s *ChatService) parallelFirstByteOpen(
 				_ = guarded.Close()
 				emptyErr := &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 				s.reportAccountFailure(account.ID, model, emptyErr)
-				s.releasePick(ctx, account.ID)
+				s.releasePick(wCtx, account.ID)
 				select {
 				case ch <- raced{err: emptyErr, idx: i}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 				return
 			}
@@ -503,10 +525,10 @@ func (s *ChatService) parallelFirstByteOpen(
 					_ = guarded.Close()
 				}
 				s.reportAccountFailure(account.ID, model, err)
-				s.releasePick(ctx, account.ID)
+				s.releasePick(wCtx, account.ID)
 				select {
 				case ch <- raced{err: err, idx: i}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 				return
 			}
@@ -516,10 +538,10 @@ func (s *ChatService) parallelFirstByteOpen(
 				}
 				emptyErr := &grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"}
 				s.reportAccountFailure(account.ID, model, emptyErr)
-				s.releasePick(ctx, account.ID)
+				s.releasePick(wCtx, account.ID)
 				select {
 				case ch <- raced{err: emptyErr, idx: i}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 				return
 			}
@@ -531,7 +553,7 @@ func (s *ChatService) parallelFirstByteOpen(
 				PreferAccount: prefer, FirstAccount: first, Failover: failover,
 				Fingerprint: fingerprint, Accounts: len(chain), Prep: prep,
 			}, idx: i}:
-			case <-ctx.Done():
+			case <-wCtx.Done():
 				_ = guarded.Close()
 				s.releasePick(context.Background(), account.ID)
 			}
@@ -551,9 +573,12 @@ func (s *ChatService) parallelFirstByteOpen(
 				lastErr = r.err
 				continue
 			}
-			// Winner: cancel others, release non-winners, bind sticky only if no prior pin
-			// or this is the sticky account (strict — do not steal prompt_cache pin).
-			cancel()
+			// Winner: cancel losers only (never cancel the winning stream), release non-winners
+			for j, w := range workers {
+				if j != r.idx {
+					w.cancel()
+				}
+			}
 			// Wait briefly for losers to close (best-effort).
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
@@ -561,7 +586,19 @@ func (s *ChatService) parallelFirstByteOpen(
 			case <-done:
 			case <-time.After(150 * time.Millisecond):
 			}
-			s.releaseChainExcept(context.Background(), chain, r.opened.AccountID)
+			// Drain and clean up any surplus winner attempts in ch
+			for {
+				select {
+				case extra := <-ch:
+					if extra.opened.Body != nil && extra.opened.AccountID != r.opened.AccountID {
+						_ = extra.opened.Body.Close()
+						s.releasePick(context.Background(), extra.opened.AccountID)
+					}
+				default:
+					goto drained
+				}
+			}
+		drained:
 			// Parallel path only after sticky miss — always rebind the winner.
 			s.bindAffinity(context.Background(), request, r.opened.AccountID)
 			return r.opened, nil

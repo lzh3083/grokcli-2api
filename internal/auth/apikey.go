@@ -220,3 +220,26 @@ func constantTimeEqual(a, b string) bool {
 	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
+
+// InvalidateKey removes a specific key hash from the in-memory cache so that
+// admin disable/delete operations take effect immediately instead of waiting
+// for the 30-second TTL to expire.
+func (v *APIKeyVerifier) InvalidateKey(keyHash string) {
+	if v == nil {
+		return
+	}
+	v.mu.Lock()
+	delete(v.keyCache, keyHash)
+	v.mu.Unlock()
+}
+
+// InvalidateAllKeys clears the entire key cache.
+func (v *APIKeyVerifier) InvalidateAllKeys() {
+	if v == nil {
+		return
+	}
+	v.mu.Lock()
+	v.keyCache = map[string]apiKeyCacheEntry{}
+	v.requiredCache = nil
+	v.mu.Unlock()
+}

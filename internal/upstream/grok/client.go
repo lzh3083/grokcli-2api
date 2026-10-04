@@ -383,9 +383,37 @@ func Retryable(err error) bool {
 }
 
 func cloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
 	out := make(map[string]any, len(input)+2)
 	for key, value := range input {
-		out[key] = value
+		switch v := value.(type) {
+		case map[string]any:
+			out[key] = cloneMap(v)
+		case []any:
+			out[key] = cloneSlice(v)
+		default:
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func cloneSlice(input []any) []any {
+	if input == nil {
+		return nil
+	}
+	out := make([]any, len(input))
+	for i, value := range input {
+		switch v := value.(type) {
+		case map[string]any:
+			out[i] = cloneMap(v)
+		case []any:
+			out[i] = cloneSlice(v)
+		default:
+			out[i] = value
+		}
 	}
 	return out
 }

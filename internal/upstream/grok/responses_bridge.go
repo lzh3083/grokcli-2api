@@ -725,7 +725,7 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 		if delta == "" {
 			return nil
 		}
-		itemID := firstString(event, "item_id")
+		itemID := firstString(event, "item_id", "call_id")
 		idx := b.toolIdxByID(itemID)
 		toolCall := map[string]any{
 			"index": idx,

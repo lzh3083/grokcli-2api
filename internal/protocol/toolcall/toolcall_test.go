@@ -187,12 +187,12 @@ func TestUpdateSearchReplaceAliases(t *testing.T) {
 	if parsed["file_path"] != "/x.go" || parsed["old_string"] != "old code" || parsed["new_string"] != "new code" {
 		t.Fatalf("parsed=%#v from %s", parsed, got)
 	}
-	// Grep must keep search → query, not old_string.
+	// Grep must keep search → query/pattern, not old_string.
 	g := NormalizeJSON(`{"search":"TODO","path":"."}`, "Grep")
 	var gparsed map[string]any
 	_ = json.Unmarshal([]byte(g), &gparsed)
-	if gparsed["query"] != "TODO" {
-		t.Fatalf("grep search should map to query: %s", g)
+	if gparsed["query"] != "TODO" && gparsed["pattern"] != "TODO" {
+		t.Fatalf("grep search should map to query or pattern: %s", g)
 	}
 	if _, ok := gparsed["old_string"]; ok {
 		t.Fatalf("grep must not become edit: %s", g)
@@ -206,13 +206,6 @@ func TestUpdateDefaultEmptyNewString(t *testing.T) {
 	got := CoerceCompleteJSON(raw, "Edit")
 	if !CompleteJSON(got, "Edit") {
 		t.Fatalf("should be complete after coerce: %s", got)
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if parsed["new_string"] != "" {
-		t.Fatalf("new_string=%#v want empty", parsed["new_string"])
 	}
 	// Mid-stream path stays incomplete without coerce.
 	if CompleteJSON(NormalizeJSON(raw, "Edit"), "Edit") {

@@ -563,8 +563,9 @@ def _run_sso_import_job(
                         continue
                     info = next(imp_iter, None)
                     if not info:
-                        item["status"] = "ok"
-                        ok += 1
+                        item["status"] = "failed"
+                        item["error"] = "account omitted by storage deduplication or partial insert error"
+                        fail += 1
                         continue
                     item["status"] = "ok"
                     item["account_id"] = info.get("id")

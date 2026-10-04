@@ -9460,6 +9460,11 @@ func serveAdminSetup(w http.ResponseWriter, r *http.Request, options Options) {
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
+	// Setup is sensitive: only allow from loopback when no admin password exists yet
+	if ip := clientIP(r); ip != "" && ip != "127.0.0.1" && ip != "::1" && !strings.HasPrefix(ip, "127.") {
+		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "admin setup is only allowed from localhost"})
+		return
+	}
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
@@ -9672,10 +9677,13 @@ func verifyAdminPassword(ctx context.Context, options Options, password string) 
 		return false, errors.New("store unavailable")
 	}
 	pw, err := options.Store.LoadAdminPassword(ctx)
-	if err == nil && pw.Hash != "" && pw.Salt != "" {
+	if err != nil {
+		return false, fmt.Errorf("cannot verify admin password: store unavailable: %w", err)
+	}
+	if pw.Hash != "" && pw.Salt != "" {
 		return adminauth.VerifyPassword(password, pw.Hash, pw.Salt), nil
 	}
-	// bootstrap via env password only when no store hash exists
+	// bootstrap via env password only when no store hash exists (first boot only)
 	envPW := strings.TrimSpace(options.Config.LegacyAdminPassword)
 	if envPW == "" {
 		// fallback common env already loaded? use os.Getenv for ADMIN_PASSWORD
@@ -9725,6 +9733,7 @@ func setAdminCookie(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+		Secure:   true,
 	})
 }
 

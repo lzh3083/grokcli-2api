@@ -21,7 +21,7 @@ services:
       TZ: "${TZ:-Asia/Shanghai}"
       PGTZ: "${TZ:-Asia/Shanghai}"
       POSTGRES_USER: grok2api
-      POSTGRES_PASSWORD: grok2api
+      POSTGRES_PASSWORD: grok2api  # ⚠️ CHANGE in production — do not use default
       POSTGRES_DB: grok2api
     volumes:
       - grok2api_pg:/var/lib/postgresql/data
@@ -46,8 +46,8 @@ services:
       # Only the app API is published. Postgres/Redis stay internal-only
       # (compose network). Inline Turnstile Solver listens on container
       # loopback 127.0.0.1:5072 and is NOT published to the host.
-      - "3000:3000"
-      - "40081:40081"
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:40081:40081"
     shm_size: "1gb"
     security_opt:
       - seccomp:unconfined

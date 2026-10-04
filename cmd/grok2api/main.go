@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hm2899/grokcli-2api/internal/admin"
+	adminauth "github.com/hm2899/grokcli-2api/internal/admin/auth"
 	"github.com/hm2899/grokcli-2api/internal/auth"
 	"github.com/hm2899/grokcli-2api/internal/buildinfo"
 	"github.com/hm2899/grokcli-2api/internal/config"
@@ -77,6 +78,23 @@ func main() {
 				slog.Info("repaired free-usage model blocks into cooldown", "accounts", n)
 			}
 			repairDone()
+
+			// Seed admin password from env on first boot
+			if envPW := strings.TrimSpace(os.Getenv("GROK2API_ADMIN_PASSWORD")); envPW != "" {
+				seedCtx, seedDone := context.WithTimeout(context.Background(), 5*time.Second)
+				has, err := store.HasAdminPassword(seedCtx)
+				if err == nil && !has {
+					hash, salt, err := adminauth.NewPassword(envPW)
+					if err == nil {
+						if err := store.SetAdminPassword(seedCtx, hash, salt); err != nil {
+							slog.Warn("failed to seed admin password from env", "error", err)
+						} else {
+							slog.Info("admin password seeded from GROK2API_ADMIN_PASSWORD")
+						}
+					}
+				}
+				seedDone()
+			}
 		}
 	}
 
