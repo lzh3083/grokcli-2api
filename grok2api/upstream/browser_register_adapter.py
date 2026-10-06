@@ -30,8 +30,8 @@ from curl_cffi import requests
 
 
 def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[str], None] = None) -> bool:
-    """非破坏性预检 accounts.x.ai / grok.com 的连通性与 Cloudflare 状态。"""
-    targets = ("https://accounts.x.ai/", "https://grok.com/")
+    """非破坏性预检 accounts.x.ai 的代理连通性（Cloudflare 盾交由后续 Camoufox 浏览器处理）。"""
+    targets = ("https://accounts.x.ai/",)
     req_proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
     for url in targets:
         try:
@@ -50,8 +50,8 @@ def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[st
             cf_blocked = ("cloudflare" in headers.get("server", "") or "cf-error" in text) and status_code in (403, 429, 503)
             if cf_blocked:
                 if log_callback:
-                    log_callback(f"[!] 路径预检告警: {url} 遭遇 Cloudflare 阻断 (HTTP {status_code})")
-                return False
+                    log_callback(f"[*] 路径预检提示: {url} 存在 Cloudflare 质询 (HTTP {status_code}, 延迟 {latency}ms)，交由 Camoufox 浏览器过盾")
+                continue
             if log_callback:
                 log_callback(f"[+] 路径预检正常: {url} (HTTP {status_code}, 延迟 {latency}ms)")
         except Exception as exc:

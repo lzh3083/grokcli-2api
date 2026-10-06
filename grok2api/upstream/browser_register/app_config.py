@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
     "proxy_pool_persist_health": False,
     "proxy_pool_state_file": "./proxy_pool_state.json",
     "proxy_pool_subscription_public_only": False,
-    "proxy_pool_preflight_enabled": True,
+    "proxy_pool_preflight_enabled": False,
     "enable_nsfw": True,
     "sso_risk_gate_enabled": True,
     "sso_risk_rejected_file": "./sso_risk_rejected.txt",

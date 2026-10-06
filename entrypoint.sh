@@ -101,7 +101,9 @@ start_inline_solver() {
   # challenge and its redemption come from different addresses.
   (
     cd /app/turnstile-solver
-    exec python api_solver.py \
+    # Unset API_KEY so inline turnstile-solver does not enforce unexpected clientKey
+    # auth against internal callers (registration sidecar) when API_KEY is set in .env.
+    exec env -u API_KEY python api_solver.py \
       --browser_type "${solver_browser}" \
       --thread "${solver_thread}" \
       --host "${solver_host}" \

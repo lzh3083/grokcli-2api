@@ -6278,7 +6278,7 @@ function readRegConfig() {
     probe_delay_sec: $("reg-probe-delay-sec")
       ? $("reg-probe-delay-sec").value.trim()
       : "30",
-    proxy_pool_preflight_enabled: $("reg-preflight-enabled") ? $("reg-preflight-enabled").checked : true,
+    proxy_pool_preflight_enabled: $("reg-preflight-enabled") ? $("reg-preflight-enabled").checked : false,
     us_consistency_enabled: $("reg-us-consistency-enabled") ? $("reg-us-consistency-enabled").checked : true,
     us_consistency_timezone: $("reg-consistency-timezone") ? $("reg-consistency-timezone").value.trim() : "",
     us_consistency_locale: $("reg-consistency-locale") ? $("reg-consistency-locale").value.trim() : "",
@@ -6460,7 +6460,7 @@ function applyRegConfig(cfg) {
     );
   }
   if ($("reg-preflight-enabled")) {
-    $("reg-preflight-enabled").checked = cfg.proxy_pool_preflight_enabled !== false;
+    $("reg-preflight-enabled").checked = cfg.proxy_pool_preflight_enabled === true;
   }
   if ($("reg-us-consistency-enabled")) {
     $("reg-us-consistency-enabled").checked = cfg.us_consistency_enabled !== false;
@@ -7078,7 +7078,7 @@ function buildRegBody(config) {
   if (Number.isFinite(probeDelay) && probeDelay >= 0) {
     body.probe_delay_sec = Math.min(600, Math.max(0, Math.floor(probeDelay)));
   }
-  body.proxy_pool_preflight_enabled = config.proxy_pool_preflight_enabled !== false;
+  body.proxy_pool_preflight_enabled = config.proxy_pool_preflight_enabled === true;
   body.us_consistency_enabled = config.us_consistency_enabled !== false;
   body.us_consistency_timezone = config.us_consistency_timezone || "";
   body.us_consistency_locale = config.us_consistency_locale || "";
