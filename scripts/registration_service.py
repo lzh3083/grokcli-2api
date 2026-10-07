@@ -140,7 +140,14 @@ def _jsonable(value: Any, *, depth: int = 0) -> Any:
 def availability(request: Request) -> dict[str, Any]:
     _require_auth(request)
     adapter = _adapter()
-    return adapter.registration_available()
+    res = dict(adapter.registration_available() or {})
+    try:
+        sched = _get_scheduler()
+        if sched is not None:
+            res["scheduler"] = _jsonable(sched.get_status())
+    except Exception:
+        pass
+    return res
 
 
 @app.post(f"{API_PREFIX}/mail/domains")
@@ -220,24 +227,9 @@ async def list_mail_domains(request: Request) -> dict[str, Any]:
     }
 
 
-@app.post(f"{API_PREFIX}/jobs")
-async def start_job(
-    request: Request,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
-    _require_auth(request)
+def _start_registration_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Execute registration start with full provider credential resolution."""
     adapter = _adapter()
-    try:
-        body = await request.json()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be object")
-    # Idempotency key is accepted for contract compatibility; adapter currently
-    # relies on its own session/batch ids.
-    _ = idempotency_key
-    # Accept full body keys then resolve active mail credentials into the
-    # historical moemail_api_key / moemail_base_url fields the adapter reads.
     kwargs = {
         k: body.get(k)
         for k in (
@@ -444,6 +436,22 @@ async def start_job(
     if result.get("ok") is False:
         raise HTTPException(status_code=400, detail=str(result.get("error") or "registration failed"))
     return _jsonable(result)
+
+
+@app.post(f"{API_PREFIX}/jobs")
+async def start_job(
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be object")
+    _ = idempotency_key
+    return _start_registration_from_body(body)
 
 
 # --- Bounded /sessions response.
@@ -951,6 +959,25 @@ async def probe_proxy_pool(request: Request) -> dict[str, Any]:
         body = await request.json()
     except Exception:
         body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    # Backward-compatible tunnel for scheduler operations before Go binary rebuild
+    sched_action = str(body.get("__scheduler_action") or "").strip().lower()
+    if sched_action:
+        sched = _get_scheduler()
+        if sched is None:
+            raise HTTPException(status_code=503, detail="scheduler unavailable")
+        if sched_action == "status":
+            return _jsonable(sched.get_status())
+        if sched_action == "update":
+            return _jsonable(sched.update_config(body))
+        if sched_action == "trigger":
+            return _jsonable(sched.trigger_now(body.get("count")))
+        if sched_action in ("reset", "reset_circuit"):
+            return _jsonable(sched.reset_circuit_breaker())
+        raise HTTPException(status_code=400, detail=f"unknown scheduler action: {sched_action}")
+
     proxies = body.get("proxies") or []
     if isinstance(proxies, str):
         proxies = [p.strip() for p in proxies.splitlines() if p.strip()]
@@ -980,6 +1007,90 @@ async def probe_proxy_pool(request: Request) -> dict[str, Any]:
         results = await asyncio.to_thread(_run_probe)
 
     return {"ok": True, "count": len(results), "nodes": results}
+
+
+_SCHEDULER: Any = None
+_SCHEDULER_LOCK = threading.Lock()
+
+
+def _get_scheduler() -> Any:
+    global _SCHEDULER
+    if _SCHEDULER is not None:
+        return _SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER is not None:
+            return _SCHEDULER
+        try:
+            from grok2api.upstream.auto_register_scheduler import AutoRegisterScheduler
+
+            _SCHEDULER = AutoRegisterScheduler(
+                start_job_fn=_start_registration_from_body,
+                get_adapter_fn=lambda: reg,
+            )
+            _SCHEDULER.start()
+        except Exception as exc:
+            print(f"[registration_service] Failed to start AutoRegisterScheduler: {exc}", flush=True)
+            return None
+        return _SCHEDULER
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _get_scheduler()
+
+
+@app.get(f"{API_PREFIX}/scheduler")
+def scheduler_status(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    sched = _get_scheduler()
+    if sched is None:
+        raise HTTPException(status_code=503, detail="scheduler unavailable")
+    return _jsonable(sched.get_status())
+
+
+@app.put(f"{API_PREFIX}/scheduler")
+@app.post(f"{API_PREFIX}/scheduler")
+async def scheduler_update(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    sched = _get_scheduler()
+    if sched is None:
+        raise HTTPException(status_code=503, detail="scheduler unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    action = str(body.get("action") or "").strip().lower()
+    if action == "trigger":
+        return _jsonable(sched.trigger_now(body.get("count")))
+    if action in ("reset", "reset_circuit"):
+        return _jsonable(sched.reset_circuit_breaker())
+    return _jsonable(sched.update_config(body))
+
+
+@app.post(f"{API_PREFIX}/scheduler/trigger")
+async def scheduler_trigger(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    sched = _get_scheduler()
+    if sched is None:
+        raise HTTPException(status_code=503, detail="scheduler unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    return _jsonable(sched.trigger_now(body.get("count")))
+
+
+@app.post(f"{API_PREFIX}/scheduler/reset")
+async def scheduler_reset(request: Request) -> dict[str, Any]:
+    _require_auth(request)
+    sched = _get_scheduler()
+    if sched is None:
+        raise HTTPException(status_code=503, detail="scheduler unavailable")
+    return _jsonable(sched.reset_circuit_breaker())
 
 
 @app.exception_handler(HTTPException)

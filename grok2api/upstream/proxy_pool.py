@@ -181,6 +181,10 @@ DIRECT_PROXY_SENTINELS = frozenset(
     {"direct", "none", "off", "no", "false", "nil", "null", "0"}
 )
 
+DYNAMIC_PROXY_SENTINELS = frozenset(
+    {"novproxy", "residential", "dynamic"}
+)
+
 _PROXY_SCHEME_PREFIXES = (
     "http://",
     "https://",
@@ -189,6 +193,19 @@ _PROXY_SCHEME_PREFIXES = (
     "socks4://",
     "socks4a://",
 )
+
+
+def is_dynamic_proxy(value: str | None) -> bool:
+    """True when ``value`` represents a dynamic residential proxy trigger rather than a fixed host:port."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    for prefix in _PROXY_SCHEME_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    token = text.rstrip("/").split(":")[0].split("-")[0].split("_")[0]
+    return token in DYNAMIC_PROXY_SENTINELS
 
 
 def is_direct_proxy(value: str | None) -> bool:
@@ -218,11 +235,16 @@ def canonicalize_proxy_line(
 
     Raises ValueError when the line is not a usable proxy.
     """
-    from grok2api.upstream.moemail import normalize_proxy_config
-
     line = (raw or "").strip()
     if not line:
         raise ValueError("empty proxy line")
+    if is_dynamic_proxy(line):
+        return line
+    if is_direct_proxy(line):
+        return "direct"
+
+    from grok2api.upstream.moemail import normalize_proxy_config
+
     # Expand host:port:user:pass shorthand first.
     expanded = _hostport_userpass(line) or line
     cfg = normalize_proxy_config(
@@ -391,7 +413,10 @@ def resolve_proxy_for_request(
             or os.getenv("GROK2API_XAI_PROXY_STRATEGY")
             or "round_robin"
         )
-    return pick_proxy(pool, strategy=strat, index=index)
+    res = pick_proxy(pool, strategy=strat, index=index)
+    if is_dynamic_proxy(res) or is_direct_proxy(res):
+        return None
+    return res
 
 
 def pool_summary(
@@ -570,8 +595,9 @@ def get_outbound_proxy_source() -> dict[str, Any]:
             from grok2api.admin.settings_store import get_registration_config
 
             reg = get_registration_config(include_secrets=True) or {}
-            if isinstance(reg, dict) and str(reg.get("proxy") or "").strip():
-                text = str(reg.get("proxy") or "").strip()
+            reg_proxy = str(reg.get("proxy") or "").strip() if isinstance(reg, dict) else ""
+            if reg_proxy and not is_dynamic_proxy(reg_proxy) and not is_direct_proxy(reg_proxy):
+                text = reg_proxy
                 user = user or str(reg.get("proxy_username") or "").strip()
                 password = password or str(reg.get("proxy_password") or "").strip()
                 strategy = normalize_proxy_strategy(
@@ -655,7 +681,11 @@ def pick_proxy_for_account(
         pool = list(src.get("pool") or [])
         if strategy is None:
             strategy = str(src.get("proxy_strategy") or "round_robin")
-    pool = [str(p).strip() for p in (pool or []) if str(p).strip()]
+    pool = [
+        str(p).strip()
+        for p in (pool or [])
+        if str(p).strip() and not is_dynamic_proxy(p) and not is_direct_proxy(p)
+    ]
     if not pool:
         return None
     mode = normalize_proxy_strategy(strategy)

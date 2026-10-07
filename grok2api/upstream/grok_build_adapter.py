@@ -3737,9 +3737,39 @@ def _run_registration(
             "importing",
             f"SSO obtained; converting via sso_to_auth_json [{ADAPTER_BUILD}]",
         )
+        # Keep the raw SSO cookie backed up BEFORE device flow so it is never lost
+        sso_cookie = str(sso or sess.get("sso") or "").strip()
+        reg_password = str(password or sess.get("password") or "").strip()
+        sso_backup_path = ""
+        if sso_cookie:
+            try:
+                sso_backup_path = _persist_registration_sso(
+                    sid=sid,
+                    email=str(email or ""),
+                    password=reg_password,
+                    sso=sso_cookie,
+                    batch_id=str(sess.get("batch_id") or "") or None,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[grok-build-auth] WARN: persist SSO backup failed: {e}")
+
         import scripts.sso_to_auth_json as sso_import
 
-        token = sso_import.sso_to_token(sso)
+        token = None
+        for _df_try in range(3):
+            if _df_try > 0:
+                print(
+                    f"[grok-build-auth] sso_to_token retry {_df_try}/2 after 4s...",
+                    flush=True,
+                )
+                time.sleep(4.0)
+            try:
+                token = sso_import.sso_to_token(sso)
+            except Exception as _dfe:
+                print(f"[grok-build-auth] WARN: sso_to_token attempt {_df_try + 1} error: {_dfe}", flush=True)
+                token = None
+            if token and token.get("access_token"):
+                break
         if not token or not token.get("access_token"):
             _note_reg_pressure("device-flow conversion failed", pause_sec=10)
             raise RuntimeError(
@@ -3749,22 +3779,6 @@ def _run_registration(
                 f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
             )
         _key, entry = sso_import.token_to_auth_entry(token, email=email)
-        # Keep the raw SSO cookie with the account so export/re-import works
-        # after process restart (registration sessions are ephemeral).
-        sso_cookie = str(sso or sess.get("sso") or "").strip()
-        reg_password = str(password or sess.get("password") or "").strip()
-        sso_backup_path = ""
-        if sso_cookie:
-            try:
-                sso_backup_path = _persist_registration_sso(
-                    sid=sid,
-                    email=str(entry.get("email") or email or ""),
-                    password=reg_password,
-                    sso=sso_cookie,
-                    batch_id=str(sess.get("batch_id") or "") or None,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(f"[grok-build-auth] WARN: persist SSO backup failed: {e}")
         import_payload: dict[str, Any] = {
             "key": entry["key"],
             "auth_mode": entry.get("auth_mode", "oidc"),
@@ -3957,7 +3971,8 @@ def _run_registration(
             _release_reg_admission_once(admission_flag)
         probe_summaries: list[dict[str, Any]] = []
         if imported_ids:
-            delay = max(0.0, float(REGISTER_PROBE_DELAY_SEC or 0.0))
+            # xAI 新账号创建后有 10-25s 的权限异步同步延迟。确保至少留出 12s 缓冲期。
+            delay = max(12.0, float(REGISTER_PROBE_DELAY_SEC or 0.0))
             if delay > 0:
                 update(
                     "probing",
@@ -4034,6 +4049,52 @@ def _run_registration(
                             "error": (str(err_text)[:180] if err_text else None),
                             "latency_ms": latency,
                         }
+                        # xAI 新账号创建后有 10-25s 的权限异步同步延迟。
+                        # 如果首次测活遇到 permission-denied，进行至多 2 次退避重试（等待 15s / 20s），
+                        # 避免权限尚未广播完成时被误杀硬删除。
+                        retries_left = 2
+                        while (
+                            not ok_flag
+                            and model_health.is_chat_access_denied_error(str(err_text or ""), status_code)
+                            and retries_left > 0
+                        ):
+                            retries_left -= 1
+                            wait_s = 15 if retries_left == 1 else 20
+                            print(
+                                f"[grok-build-auth] 账号 {aid} 聊天权限同步中 ({str(err_text)[:60]}…)，等待 {wait_s}s 后重试测活...",
+                                flush=True,
+                            )
+                            time.sleep(wait_s)
+                            pr = model_health.probe_single_account(
+                                aid, None, auto_disable=False, source="register"
+                            )
+                            detail = pr.get("result") if isinstance(pr, dict) else None
+                            if not isinstance(detail, dict):
+                                detail = pr if isinstance(pr, dict) else {}
+                            err_text = (
+                                detail.get("error")
+                                or detail.get("message")
+                                or (pr.get("error") if isinstance(pr, dict) else None)
+                                or ""
+                            )
+                            latency = (
+                                detail.get("latency_ms")
+                                or detail.get("elapsed_ms")
+                                or detail.get("duration_ms")
+                            )
+                            ok_flag = bool(pr.get("ok") if isinstance(pr, dict) else False)
+                            status_code = detail.get("status_code") or (
+                                pr.get("status_code") if isinstance(pr, dict) else None
+                            )
+                            summary["ok"] = ok_flag
+                            summary["error"] = (str(err_text)[:180] if err_text else None)
+                            summary["latency_ms"] = latency
+                            if ok_flag:
+                                print(
+                                    f"[grok-build-auth] 账号 {aid} 权限同步完成，测活成功恢复！",
+                                    flush=True,
+                                )
+
                         # A chat-endpoint authorisation refusal is terminal: the
                         # credential is valid but xAI will never serve this
                         # account. Delete it rather than leave a pool entry that
@@ -4052,7 +4113,7 @@ def _run_registration(
                             summary["discarded"] = "chat-access-denied"
                             discarded_ids.append(aid)
                             print(
-                                f"[grok-build-auth] 账号 {aid} 聊天端点无权限，已删除（不计入可用账号）",
+                                f"[grok-build-auth] 账号 {aid} 重试后仍无聊天权限，已删除（不计入可用账号）",
                                 flush=True,
                             )
                         probe_summaries.append(summary)

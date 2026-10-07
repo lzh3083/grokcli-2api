@@ -30,8 +30,8 @@ from curl_cffi import requests
 
 
 def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[str], None] = None) -> bool:
-    """非破坏性预检 accounts.x.ai 的代理连通性（Cloudflare 盾交由后续 Camoufox 浏览器处理）。"""
-    targets = ("https://accounts.x.ai/",)
+    """非破坏性预检 accounts.x.ai / grok.com 的连通性与 Cloudflare 状态。"""
+    targets = ("https://accounts.x.ai/", "https://grok.com/")
     req_proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
     for url in targets:
         try:
@@ -50,8 +50,8 @@ def _preflight_registration_path(proxy_url: str = "", log_callback: Callable[[st
             cf_blocked = ("cloudflare" in headers.get("server", "") or "cf-error" in text) and status_code in (403, 429, 503)
             if cf_blocked:
                 if log_callback:
-                    log_callback(f"[*] 路径预检提示: {url} 存在 Cloudflare 质询 (HTTP {status_code}, 延迟 {latency}ms)，交由 Camoufox 浏览器过盾")
-                continue
+                    log_callback(f"[!] 路径预检告警: {url} 遭遇 Cloudflare 阻断 (HTTP {status_code})")
+                return False
             if log_callback:
                 log_callback(f"[+] 路径预检正常: {url} (HTTP {status_code}, 延迟 {latency}ms)")
         except Exception as exc:
@@ -145,26 +145,64 @@ def run_browser_registration(
 
     # NovProxy 动态住宅代理自适应提取
     configured_mode = str(cfg.get("proxy_mode") or "").strip().lower()
-    if active_proxy.lower() in ("novproxy", "residential") or (not active_proxy and configured_mode in ("novproxy", "residential")):
+    clean_proxy = str(active_proxy).strip().lower()
+    for _pfx in ("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://"):
+        if clean_proxy.startswith(_pfx):
+            clean_proxy = clean_proxy[len(_pfx):]
+            break
+    clean_proxy = clean_proxy.rstrip("/")
+
+    is_novproxy = (
+        clean_proxy in ("novproxy", "residential", "dynamic")
+        or clean_proxy.startswith("novproxy")
+        or configured_mode in ("novproxy", "residential")
+    )
+    if is_novproxy:
         try:
             from grok2api.upstream.browser_register import novproxy
             api_base = str(cfg.get("novproxy_api") or sess.get("novproxy_api") or "https://white.novproxy.com/white/api").strip()
-            region = str(cfg.get("novproxy_region") or sess.get("novproxy_region") or "JP").strip()
-            minutes = int(cfg.get("novproxy_minutes") or sess.get("novproxy_minutes") or 60)
+
+            # 地区自适应提取：
+            # 1. 从 proxy 字符串自身解析（如 novproxy-jp, novproxy-sg, novproxy:jp, novproxy:sg）
+            # 2. 从配置 novproxy_region 或 sess 中读取
+            # 3. 环境变量或主机自适应（新加坡 -> SG，东京 -> JP）
+            region = ""
+            if any(k in clean_proxy for k in ("-jp", ":jp", "_jp", "japan", "tokyo")):
+                region = "JP"
+            elif any(k in clean_proxy for k in ("-sg", ":sg", "_sg", "singapore")):
+                region = "SG"
+            elif any(k in clean_proxy for k in ("-us", ":us", "_us", "usa", "america")):
+                region = "US"
+
+            if not region:
+                region = str(cfg.get("novproxy_region") or sess.get("novproxy_region") or "").strip().upper()
+
+            if not region:
+                env_reg = (os.environ.get("GROK2API_NODE_REGION") or os.environ.get("NODE_REGION") or "").strip().upper()
+                if env_reg:
+                    region = env_reg
+                elif "singapore" in os.uname().nodename.lower() or os.uname().nodename.startswith("instance-20231018"):
+                    region = "SG"
+                else:
+                    region = "JP"
+
+            minutes = int(cfg.get("novproxy_minutes") or sess.get("novproxy_minutes") or 120)
             _log_cb(f"[*] 正在从 NovProxy 提取实时动态住宅代理 ({region})...")
             nodes = novproxy.fetch_nodes(
                 api_base=api_base,
                 region=region,
                 num=1,
                 minutes=minutes,
-                attempts=2,
-                timeout=12.0,
+                attempts=3,
+                timeout=15.0,
                 log=_log_cb,
             )
             if nodes:
                 node = nodes[0]
                 active_proxy = node if "://" in node else f"socks5h://{node}"
-                _log_cb(f"[+] 成功分配 NovProxy 住宅节点: {active_proxy}")
+                _log_cb(f"[+] 成功分配 NovProxy 住宅节点 ({region}): {active_proxy}")
+                # 动态住宅代理使用原生出口，跳过昂贵的预检请求以节约流量并避免指纹突变
+                cfg["proxy_pool_preflight_enabled"] = False
         except Exception as n_exc:
             _log_cb(f"[!] NovProxy 动态提取失败: {n_exc}")
             active_proxy = ""

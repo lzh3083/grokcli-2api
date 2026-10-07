@@ -675,6 +675,139 @@
     <pre id="reg-log" class="g2a-log is-empty hidden" hidden>—</pre>
   </div>
 </section>
+
+<section id="sec-auto-reg" class="g2a-card" style="margin-top:16px">
+  <div class="g2a-card-head">
+    <div>
+      <h3>定时与自动补齐注册（双模）</h3>
+      <p>无人值守常驻调度：支持<strong>随机时间间隔慢速保鲜</strong>与<strong>账号池低水位自动补齐</strong>，内置防重叠并发锁与连续失败安全熔断机制。</p>
+    </div>
+    <div class="g2a-actions">
+      <button class="g2a-btn g2a-btn-primary" id="btn-save-auto-reg" type="button">保存定时配置</button>
+      <button class="g2a-btn g2a-btn-default" id="btn-trigger-auto-reg" type="button" title="忽略等待时间，立即执行一轮注册">立即执行一轮</button>
+      <button class="g2a-btn g2a-btn-warning hidden" id="btn-reset-circuit-auto-reg" type="button" style="display:none" title="重置连续失败熔断，恢复自动调度">重置熔断</button>
+      <button class="g2a-btn g2a-btn-default" id="btn-refresh-auto-reg" type="button">刷新状态</button>
+    </div>
+  </div>
+
+  <!-- 实时运行状态与监控看板 -->
+  <div class="g2a-subcard" style="margin-bottom:14px;background:var(--ant-color-fill-quaternary, rgba(255,255,255,0.03))">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;font-size:13px">
+      <div class="g2a-kv">
+        <span class="g2a-muted">调度器状态</span>
+        <span id="auto-reg-status-badge" class="g2a-tag">未启动</span>
+      </div>
+      <div class="g2a-kv">
+        <span class="g2a-muted">下次计划执行</span>
+        <strong id="auto-reg-next-time">—</strong>
+      </div>
+      <div class="g2a-kv">
+        <span class="g2a-muted">账号池实时可用</span>
+        <span id="auto-reg-pool-live">—</span>
+      </div>
+      <div class="g2a-kv">
+        <span class="g2a-muted">累计自动产出</span>
+        <span id="auto-reg-stats-summary">—</span>
+      </div>
+    </div>
+    <div id="auto-reg-circuit-banner" class="g2a-alert hidden" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(255,77,79,0.15);border:1px solid #ff4d4f;border-radius:4px;color:#ff7875">
+      <strong>⚠️ 安全熔断已触发：</strong><span id="auto-reg-circuit-msg">已暂停自动注册</span>
+    </div>
+  </div>
+
+  <div class="g2a-form-grid">
+    <div class="g2a-field g2a-field-span2">
+      <label class="g2a-check">
+        <input type="checkbox" id="auto-reg-enabled" />
+        <strong>启用自动注册调度器</strong>
+      </label>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">开启后后台守护线程将按设定规则常驻执行，继承上方【协议注册】所配置的邮箱与代理。</div>
+    </div>
+
+    <div class="g2a-field g2a-field-span2">
+      <label for="auto-reg-mode">调度模式</label>
+      <select id="auto-reg-mode">
+        <option value="both" selected>双模联动（随机间隔温和保鲜 + 低水位自动补齐 · 推荐）</option>
+        <option value="interval">仅随机时间间隔（固定在设定区间内随机波动）</option>
+        <option value="watermark">仅低水位自动补齐（低于警戒线才补充）</option>
+      </select>
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">双模联动：平时按随机时间间隔缓慢补充新号维持活跃；一旦可用号跌破下限，立即优先拉升水位。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-min-interval">随机最小间隔（分钟）</label>
+      <input id="auto-reg-min-interval" type="number" min="1" max="10080" value="60" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">随机周期下限，例如 60 分钟。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-max-interval">随机最大间隔（分钟）</label>
+      <input id="auto-reg-max-interval" type="number" min="1" max="10080" value="180" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">随机周期上限，每轮在区间内随机抽取下次等待时间。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-batch-size">每次注册数量</label>
+      <input id="auto-reg-batch-size" type="number" min="1" max="50" value="2" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">单次触发启动的账号数（建议 1~3 个，分散 IP 频次）。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-max-pool-size">账号池容量上限（个）</label>
+      <input id="auto-reg-max-pool-size" type="number" min="0" max="50000" value="100" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">可用账号达到此数量时，定时模式自动跳过（0 为不限制）。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-watermark-min">最低警戒水位（个）</label>
+      <input id="auto-reg-watermark-min" type="number" min="0" max="50000" value="20" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">当正常可用账号数量低于此数值时，立即触发低水位补齐。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-watermark-target">目标恢复水位（个）</label>
+      <input id="auto-reg-watermark-target" type="number" min="1" max="50000" value="30" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">低水位补齐的目标可用账号数（分批次补齐至目标）。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-watermark-cooldown">补齐波次冷却（分钟）</label>
+      <input id="auto-reg-watermark-cooldown" type="number" min="1" max="1440" value="15" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">连续多波次低水位补齐之间的保护冷却时间。</div>
+    </div>
+
+    <div class="g2a-field">
+      <label for="auto-reg-max-failures">连续失败熔断阈值（次）</label>
+      <input id="auto-reg-max-failures" type="number" min="1" max="20" value="3" />
+      <div class="g2a-muted" style="margin-top:2px;font-size:12px">连续 N 轮注册未产出可用账号时自动暂停，防止死循环耗损代理。</div>
+    </div>
+
+    <div class="g2a-field g2a-field-span2" style="margin-top:10px;padding-top:12px;border-top:1px solid var(--ant-color-border-secondary, #303030)">
+      <div style="font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between">
+        <span>最近调度记录</span>
+        <span id="auto-reg-history-count" class="g2a-muted" style="font-size:12px">0 条</span>
+      </div>
+      <div style="margin-top:8px;overflow-x:auto;max-height:220px;border:1px solid var(--ant-color-border-secondary, #303030);border-radius:6px">
+        <table class="g2a-table" style="width:100%;font-size:12.5px;text-align:left">
+          <thead>
+            <tr style="background:var(--ant-color-fill-quaternary, rgba(255,255,255,0.04))">
+              <th style="padding:6px 10px;width:150px">完成时间</th>
+              <th style="padding:6px 10px;width:120px">触发原因</th>
+              <th style="padding:6px 10px;width:90px">产出/请求</th>
+              <th style="padding:6px 10px;width:70px">耗时</th>
+              <th style="padding:6px 10px">执行摘要</th>
+            </tr>
+          </thead>
+          <tbody id="auto-reg-history-body">
+            <tr>
+              <td colspan="5" style="text-align:center;padding:14px;color:var(--ant-color-text-secondary, #888)">暂无调度记录</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
     </div>
 
     <div class="g2a-subpanel" data-section="sso" id="panel-sso" hidden>
@@ -798,6 +931,6 @@
   <script src="/static/dist/api.9ac71f7ed9.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/auth.fa7b1e0e4d.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.0bf843ac91.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.3b9418cf90.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>

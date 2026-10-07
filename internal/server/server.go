@@ -427,6 +427,21 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/accounts/register-email/proxy-probe", func(w http.ResponseWriter, r *http.Request) {
 		serveProxyPoolProbe(w, r, options)
 	})
+	mux.HandleFunc("GET /admin/api/accounts/register-email/scheduler", func(w http.ResponseWriter, r *http.Request) {
+		serveRegistrationSchedulerGet(w, r, options)
+	})
+	mux.HandleFunc("PUT /admin/api/accounts/register-email/scheduler", func(w http.ResponseWriter, r *http.Request) {
+		serveRegistrationSchedulerPut(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/accounts/register-email/scheduler", func(w http.ResponseWriter, r *http.Request) {
+		serveRegistrationSchedulerPut(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/accounts/register-email/scheduler/trigger", func(w http.ResponseWriter, r *http.Request) {
+		serveRegistrationSchedulerTrigger(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/accounts/register-email/scheduler/reset", func(w http.ResponseWriter, r *http.Request) {
+		serveRegistrationSchedulerReset(w, r, options)
+	})
 	mux.HandleFunc("POST /admin/api/register-email/test-proxy", func(w http.ResponseWriter, r *http.Request) {
 		serveRegistrationProxyTest(w, r, options)
 	})
@@ -6269,6 +6284,84 @@ func serveRegistrationStopAll(w http.ResponseWriter, r *http.Request, options Op
 		return
 	}
 	payload, err := client.StopAll(r.Context())
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveRegistrationSchedulerGet(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, false) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	payload, err := client.SchedulerStatus(r.Context())
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveRegistrationSchedulerPut(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	payload, err := client.SchedulerUpdate(r.Context(), body)
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveRegistrationSchedulerTrigger(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	payload, err := client.SchedulerTrigger(r.Context(), body)
+	if err != nil {
+		writeRegistrationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func serveRegistrationSchedulerReset(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration service URL is not configured"})
+		return
+	}
+	payload, err := client.SchedulerReset(r.Context())
 	if err != nil {
 		writeRegistrationError(w, err)
 		return
