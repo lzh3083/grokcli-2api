@@ -401,56 +401,60 @@ def poll_token(
     return None
 
 
-def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
+def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = None) -> dict | None:
     """SSO cookie → token dict (access/refresh/expires_in).
 
     ``quiet=True`` reduces per-account stdout (faster under high concurrency).
+    ``proxy`` optionally forces a specific proxy (e.g. the one used during registration).
 
-    Retries the full device flow on xAI rate limits (device/code 429 slow_down,
-    verify/approve ``rate_limited``). Concurrent registration workers otherwise
-    produce consecutive conversion failures after SSO was already obtained.
+    Retries the full device flow on xAI rate limits, transient network blips, or
+    new-account propagation delays.
     """
     log = (lambda *a, **k: None) if quiet else print
-    s = requests.Session()
-    s.cookies.set("sso", sso_cookie, domain=".x.ai")
     timeout = _http_timeout()
-    proxy_kw = _proxy_kwargs()
-
-    try:
-        r = s.get(
-            "https://accounts.x.ai/",
-            impersonate="chrome",
-            timeout=timeout,
-            **proxy_kw,
-        )
-    except Exception as e:
-        log(f"  ❌ 网络错误: {e}")
-        return None
-    if "sign-in" in r.url or "sign-up" in r.url:
-        log("  ❌ sso 无效")
-        return None
-    log("  ✅ sso 有效")
-
     retries = _device_flow_retries()
+    raw_sso = str(sso_cookie or "").strip()
+    if not raw_sso:
+        return None
+
+    # Resolve proxy kwargs: explicit proxy > pool / env
+    if proxy:
+        proxy_kw = {"proxies": {"http": proxy, "https": proxy}}
+    else:
+        proxy_kw = _proxy_kwargs()
+
+    last_error_note = ""
     for attempt in range(1, retries + 1):
         log(f"  🔑 Device Flow... (try {attempt}/{retries})")
+        # Fresh curl_cffi session per attempt to avoid stale TLS state
+        s = requests.Session()
+        for dom in (".x.ai", "accounts.x.ai", "auth.x.ai"):
+            s.cookies.set("sso", raw_sso, domain=dom)
+            s.cookies.set("sso-rw", raw_sso, domain=dom)
+
         dc = request_device_code(session=s)
-        if not dc:
+        if not dc or not dc.get("device_code"):
+            last_error_note = "device_code_empty"
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
+            break
         log(f"  📋 user_code: {dc.get('user_code')}")
 
-        rate_limited = False
         consent_fields: dict[str, str] = {}
         try:
-            s.get(
-                dc["verification_uri_complete"],
-                impersonate="chrome",
-                timeout=timeout,
-                **proxy_kw,
-            )
+            # Complete URI load (seeds cookies/flow)
+            if dc.get("verification_uri_complete"):
+                try:
+                    s.get(
+                        dc["verification_uri_complete"],
+                        impersonate="chrome",
+                        timeout=timeout,
+                        **proxy_kw,
+                    )
+                except Exception:
+                    pass
+
             r = s.post(
                 f"{OIDC_ISSUER}/oauth2/device/verify",
                 data={"user_code": dc["user_code"]},
@@ -460,10 +464,6 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
                 allow_redirects=True,
                 **proxy_kw,
             )
-            # The consent page carries a signed consent_token in a hidden input.
-            # /oauth2/device/approve rejects the request with
-            # 403 "Request could not be verified" unless that token is posted
-            # back, so scrape the form instead of hard-coding the fields.
             try:
                 import re as _re
 
@@ -481,26 +481,21 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
                 log(f"  ⚠️ consent 解析失败: {_parse_exc}")
 
             if "consent" not in (r.url or ""):
-                log(f"  ❌ verify 失败: {r.url}")
-                if _is_rate_limited_payload(getattr(r, "text", None), r.url, getattr(r, "status_code", None)):
-                    rate_limited = True
-                else:
-                    return None
+                last_error_note = f"verify_redirect_to_{r.url}"
+                log(f"  ❌ verify 未进 consent: {r.url}")
+                if attempt < retries:
+                    time.sleep(_device_flow_backoff_sec(attempt))
+                    continue
+                break
         except Exception as e:
+            last_error_note = f"verify_exception_{e}"
             log(f"  ❌ verify 异常: {e}")
-            if _is_rate_limited_payload(str(e)):
-                rate_limited = True
-            else:
-                return None
-        if rate_limited:
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
+            break
 
         try:
-            # Replay the consent form verbatim (consent_token / principal_*),
-            # then force the fields the flow requires.
             approve_data = dict(consent_fields)
             approve_data.update(
                 {
@@ -513,10 +508,6 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
             r = s.post(
                 f"{OIDC_ISSUER}/oauth2/device/approve",
                 data=approve_data,
-                # xAI verifies the request origin on this endpoint: without
-                # Origin/Referer it answers 403 with its own
-                # "Request could not be verified" page (not a Cloudflare
-                # challenge, which is why clearance cookies did not help).
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Origin": "https://accounts.x.ai",
@@ -528,21 +519,22 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
                 **proxy_kw,
             )
             if "done" not in (r.url or ""):
+                last_error_note = f"approve_redirect_to_{r.url}"
                 log(f"  ❌ approve 失败: {r.url}")
-                if _is_rate_limited_payload(getattr(r, "text", None), r.url, getattr(r, "status_code", None)):
-                    if attempt < retries:
-                        time.sleep(_device_flow_backoff_sec(attempt))
-                        continue
-                return None
+                if attempt < retries:
+                    time.sleep(_device_flow_backoff_sec(attempt))
+                    continue
+                break
             log("  ✅ 授权确认")
         except Exception as e:
+            last_error_note = f"approve_exception_{e}"
             log(f"  ❌ approve 异常: {e}")
-            if _is_rate_limited_payload(str(e)) and attempt < retries:
+            if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
+            break
 
-        # Approve already happened — poll immediately with a short interval.
+        # Approve already happened — poll immediately with short interval
         token = poll_token(
             dc["device_code"],
             dc.get("interval", 1),
@@ -552,16 +544,20 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
             immediate=True,
         )
         if not token:
+            last_error_note = "token_poll_empty"
             if attempt < retries:
                 log("  ⏳ token poll empty — retry device flow")
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
-            return None
+            break
         log(
             f"  ✅ access_token (expires_in={token.get('expires_in')}s)"
             + (" + refresh_token" if token.get("refresh_token") else "")
         )
         return token
+
+    if last_error_note:
+        log(f"  ❌ Device flow failed: {last_error_note}")
     return None
 
 

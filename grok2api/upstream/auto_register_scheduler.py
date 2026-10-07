@@ -343,7 +343,8 @@ class AutoRegisterScheduler:
             adapter = self._get_adapter_fn()
             if adapter is None:
                 return False
-            sessions = adapter.list_registration_sessions() or []
+            raw = adapter.list_registration_sessions() or []
+            sessions = raw.get("sessions", []) if isinstance(raw, dict) else raw
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
@@ -366,12 +367,22 @@ class AutoRegisterScheduler:
             adapter = self._get_adapter_fn()
             if adapter is None:
                 return True, 0, 0, ["adapter unavailable"]
-            if batch_id and not sids:
+
+            # If a batch was started, inspect batch master state and refresh session list
+            if batch_id:
                 b = adapter.get_registration_batch(batch_id)
                 if isinstance(b, dict):
-                    sids = list(b.get("session_ids") or [])
-                    with self._lock:
-                        self._state["active_session_ids"] = sids
+                    bst = str(b.get("status") or "").strip().lower()
+                    batch_sids = [str(x) for x in (b.get("session_ids") or []) if x]
+                    if batch_sids:
+                        sids = batch_sids
+                        with self._lock:
+                            self._state["active_session_ids"] = sids
+
+                    # If the batch runner is still active or pending, it is NOT settled
+                    if bst not in TERMINAL_SESSION_STATUSES and not b.get("finished"):
+                        return False, 0, 0, []
+
             if not sids:
                 return False, 0, 0, []
 
@@ -399,9 +410,45 @@ class AutoRegisterScheduler:
                 elif st == "imported" and not discarded:
                     imported_ok += 1
                 else:
-                    failed_n += 1
-                    err = str(s.get("error") or s.get("message") or st)[:80]
-                    notes.append(f"{sid}: {err}")
+                    # Self-healing: if session failed at importing stage but SSO backup exists, try auto-rescue
+                    sso_val = s.get("sso")
+                    email_val = s.get("email")
+                    rescued = False
+                    if sso_val and email_val:
+                        try:
+                            import scripts.sso_to_auth_json as sso_import
+                            import grok2api.pool.accounts as acc_store
+                            tok = sso_import.sso_to_token(sso_val, quiet=True)
+                            if tok and tok.get("access_token"):
+                                _k, ent = sso_import.token_to_auth_entry(tok, email=email_val)
+                                imp_res = acc_store.import_auth_payload(
+                                    {
+                                        "key": ent["key"],
+                                        "auth_mode": ent.get("auth_mode", "oidc"),
+                                        "email": email_val,
+                                        "refresh_token": ent.get("refresh_token", ""),
+                                        "expires_at": ent.get("expires_at"),
+                                        "oidc_issuer": ent.get("oidc_issuer", "https://auth.x.ai"),
+                                        "oidc_client_id": ent.get("oidc_client_id", ""),
+                                        "source": "register-email",
+                                        "sso": sso_val,
+                                        "sso_cookie": sso_val,
+                                        "sso_token": sso_val,
+                                        "password": s.get("password", ""),
+                                    },
+                                    merge=True,
+                                )
+                                if imp_res.get("ok"):
+                                    imported_ok += 1
+                                    rescued = True
+                        except Exception:
+                            rescued = False
+
+                    if not rescued:
+                        failed_n += 1
+                        err = str(s.get("error") or s.get("message") or st)[:80]
+                        notes.append(f"{sid}: {err}")
+
             return True, imported_ok, failed_n, notes
         except Exception as exc:
             return False, 0, 0, [str(exc)]

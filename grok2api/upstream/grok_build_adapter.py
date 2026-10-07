@@ -3753,16 +3753,22 @@ def _run_registration(
             except Exception as e:  # noqa: BLE001
                 print(f"[grok-build-auth] WARN: persist SSO backup failed: {e}")
 
+        # Settle buffer: allow xAI backend 3.5s to propagate the new account session before OIDC device verify
+        time.sleep(3.5)
+
         import scripts.sso_to_auth_json as sso_import
 
         token = None
-        for _df_try in range(3):
+        max_df_tries = 4
+        df_backoffs = (5.0, 8.0, 12.0)
+        for _df_try in range(max_df_tries):
             if _df_try > 0:
-                print(
-                    f"[grok-build-auth] sso_to_token retry {_df_try}/2 after 4s...",
-                    flush=True,
+                wait_sec = df_backoffs[_df_try - 1] if _df_try - 1 < len(df_backoffs) else 10.0
+                update(
+                    "importing",
+                    f"SSO obtained; waiting {wait_sec}s for xAI session sync before retry {_df_try + 1}/{max_df_tries} [{ADAPTER_BUILD}]",
                 )
-                time.sleep(4.0)
+                time.sleep(wait_sec)
             try:
                 token = sso_import.sso_to_token(sso)
             except Exception as _dfe:
