@@ -1883,7 +1883,6 @@ func TestStreamOpenAIResponsesTextSoftShortWriteNotTruncated(t *testing.T) {
 	}
 }
 
-
 func TestEnsureOpenAIChatPromptCacheKeyStable(t *testing.T) {
 	// Turn 1: no explicit pck → mint from first user seed.
 	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)

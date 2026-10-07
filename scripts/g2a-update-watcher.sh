@@ -16,7 +16,7 @@
 #   G2A_POLL_SEC=5
 #   G2A_SERVICE=grokcli-2api
 #   G2A_USE_GHCR=1              # default 1: write override image to GHCR tag
-#   G2A_IMAGE=ghcr.io/hm2899/grokcli-2api
+#   G2A_IMAGE=ghcr.io/lzh3083/grokcli-2api
 #   G2A_OVERRIDE_FILE=docker-compose.hot-update.yml
 
 set -euo pipefail
@@ -26,7 +26,7 @@ DATA_DIR="${G2A_DATA_DIR:-/var/lib/grokcli-2api/data}"
 POLL_SEC="${G2A_POLL_SEC:-5}"
 SERVICE="${G2A_SERVICE:-grokcli-2api}"
 USE_GHCR="${G2A_USE_GHCR:-1}"
-DEFAULT_IMAGE="${G2A_IMAGE:-ghcr.io/hm2899/grokcli-2api}"
+DEFAULT_IMAGE="${G2A_IMAGE:-ghcr.io/lzh3083/grokcli-2api}"
 OVERRIDE_FILE="${G2A_OVERRIDE_FILE:-docker-compose.hot-update.yml}"
 REQ_FILE="${DATA_DIR}/update.request"
 STATUS_FILE="${DATA_DIR}/update.status"

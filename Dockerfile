@@ -1,13 +1,15 @@
 # grokcli-2api — single container with optional inline Turnstile Solver
-FROM golang:1.24-bookworm AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS go-builder
 
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN go build -o /out/grok2api ./cmd/grok2api \
-    && go build -o /out/grok2api-migrate ./cmd/grok2api-migrate
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/grok2api ./cmd/grok2api \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/grok2api-migrate ./cmd/grok2api-migrate
 
 FROM python:3.12-slim-bookworm
 
@@ -60,11 +62,14 @@ ARG DOCKER_CLI_VERSION=27.5.1
 ARG TARGETARCH
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
         chromium \
         curl \
         fonts-liberation \
         fonts-noto-color-emoji \
+        g++ \
+        gcc \
         libasound2 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
@@ -88,6 +93,8 @@ RUN apt-get update \
         libxshmfence1 \
         libxss1 \
         libxtst6 \
+        libzstd-dev \
+        python3-dev \
         tzdata \
         xvfb \
     && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \

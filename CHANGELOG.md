@@ -4,6 +4,33 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.2] - 2026-10-07
+
+> **版本分级说明**：本次更新重点修复甲骨文服务器容器内热更新镜像源地址错误与 Dockerfile 多架构构建缺失 C/C++ 依赖问题，同时对任务日志系统进行交互体验升级（支持点击行弹窗查看任务详情与完整执行日志），按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.1` → `v2.1.2`）**。
+
+### 🚀 新增功能与体验升级 (Features & Improvements)
+
+- **任务日志点击弹窗交互（Task Log Detail Modal）**：
+  - 在「任务日志」页面支持点击任意任务行，立即在当前屏幕居中弹出结构化详情模态框。
+  - **核心元数据卡片**：聚合展示任务 ID、任务类型、执行状态、进度条、起止时间、耗时，以及关联邮箱、会话 ID、批次 ID 等；
+  - **终端风格日志区**：自动高亮展示步骤日志流（`log_tail`），并支持异步拉取完整的注册会话日志（`log_lines`）；
+  - **异常错误卡片**：如果任务失败，以独立红框警告卡片逐行呈现错误细节；
+  - **完整原始 JSON 预览与一键复制**：提供一键复制详情 JSON 到剪贴板，支持按 ESC 或点击空白处随时关闭。
+- **远程 CHANGELOG 穿透解析**：
+  - 当旧版本容器（如 `v2.0.11`）执行「检查更新」时，若本地尚未包含新版本章节，系统自动从 GitHub 远程拉取最新变更说明并呈现给管理员，消除“已运行当前最新版本”的提示误导。
+
+### 🛡️ 稳定性与缺陷修复 (Bug Fixes & Reliability Improvements)
+
+- **彻底纠正热更新默认镜像地址**：
+  - 全面清理 `docker-compose.yml`、`g2a-hot-update-incontainer.sh`、`g2a-update-watcher.sh`、`.env.example` 中遗留的上游旧镜像 `ghcr.io/hm2899/grokcli-2api`，统一修正为当前主仓库 `ghcr.io/lzh3083/grokcli-2api`，彻底解决热更新拉取镜像时报错 `not found` 的问题。
+- **修复 Dockerfile ARM64 多架构构建缺失 C/C++ 依赖**：
+  - 在容器基础镜像中增加 `build-essential`、`gcc`、`g++`、`python3-dev`、`libzstd-dev`，解决最新 `camoufox` 依赖 `fpgen -> indexed-zstd` 在 ARM64 下无预编译 wheel 导致 GitHub Actions 镜像构建失败的问题。
+  - 优化 Dockerfile Go 构建阶段采用 `FROM --platform=$BUILDPLATFORM` 原生交叉编译，大幅提升多架构构建速度。
+- **修复 Go 代码格式化问题**：
+  - 修复 `gofmt` 代码格式，确保 GitHub Actions 兼容性测试（`compatibility.yml`）严格通过。
+
+---
+
 ## [v2.1.1] - 2026-10-07
 
 > **版本分级说明**：本次更新针对批量注册时偶发的「SSO conversion failed (device verify/approve/token)」及调度器提早结算问题进行紧急稳定性修复，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.0` → `v2.1.1`）**。

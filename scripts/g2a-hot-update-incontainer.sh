@@ -20,10 +20,10 @@ set -euo pipefail
 log() { echo "[g2a-hot-update $(date '+%F %T')] $*"; }
 
 TAG="${1:-${GROK2API_UPDATE_TAG:-latest}}"
-IMAGE="${2:-${GROK2API_UPDATE_IMAGE:-${GROK2API_GHCR_IMAGE:-ghcr.io/hm2899/grokcli-2api}}}"
+IMAGE="${2:-${GROK2API_UPDATE_IMAGE:-${GROK2API_GHCR_IMAGE:-ghcr.io/lzh3083/grokcli-2api}}}"
 TAG="${TAG#v}"
 [[ -n "$TAG" ]] || TAG="latest"
-[[ -n "$IMAGE" ]] || IMAGE="ghcr.io/hm2899/grokcli-2api"
+[[ -n "$IMAGE" ]] || IMAGE="ghcr.io/lzh3083/grokcli-2api"
 
 SERVICE="${GROK2API_DOCKER_SERVICE:-grokcli-2api}"
 COMPOSE_DIR="${GROK2API_COMPOSE_DIR:-/compose}"

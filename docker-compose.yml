@@ -105,7 +105,7 @@ services:
       GROK2API_HOT_UPDATE_MODE: "${GROK2API_HOT_UPDATE_MODE:-docker}"
       GROK2API_COMPOSE_DIR: "${GROK2API_COMPOSE_DIR:-/compose}"
       GROK2API_DOCKER_SERVICE: "${GROK2API_DOCKER_SERVICE:-grokcli-2api}"
-      GROK2API_GHCR_IMAGE: "${GROK2API_GHCR_IMAGE:-ghcr.io/hm2899/grokcli-2api}"
+      GROK2API_GHCR_IMAGE: "${GROK2API_GHCR_IMAGE:-ghcr.io/lzh3083/grokcli-2api}"
     healthcheck:
       # $$ keeps substitution inside the container so override ports (e.g. 40081) work
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${GROK2API_PORT:-3000}/health >/dev/null"]

@@ -380,20 +380,8 @@ func serveVersionUpdate(w http.ResponseWriter, r *http.Request, options Options)
 	}
 }
 
-func localChangelogNotes(ver string) (string, string) {
+func parseChangelogText(text, ver string) (string, string, bool) {
 	ver = strings.TrimPrefix(strings.TrimSpace(ver), "v")
-	paths := []string{"/app/CHANGELOG.md", "CHANGELOG.md", "../CHANGELOG.md"}
-	var content []byte
-	for _, p := range paths {
-		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
-			content = b
-			break
-		}
-	}
-	if len(content) == 0 {
-		return fmt.Sprintf("v%s 最新稳定版", ver), "已运行当前最新版本。"
-	}
-	text := string(content)
 	target := "## [v" + ver + "]"
 	idx := strings.Index(text, target)
 	if idx == -1 {
@@ -401,7 +389,7 @@ func localChangelogNotes(ver string) (string, string) {
 		idx = strings.Index(text, target)
 	}
 	if idx == -1 {
-		return fmt.Sprintf("v%s 最新稳定版", ver), "已运行当前最新版本。"
+		return "", "", false
 	}
 	sub := text[idx:]
 	lines := strings.Split(sub, "\n")
@@ -428,9 +416,59 @@ func localChangelogNotes(ver string) (string, string) {
 	}
 	notes := strings.TrimSpace(strings.Join(notesLines, "\n"))
 	if notes == "" {
-		notes = "已运行当前最新版本。"
+		return title, "", false
 	}
-	return title, notes
+	return title, notes, true
+}
+
+func fetchRemoteChangelogNotes(ctx context.Context, repo, ver string) (string, string, bool) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || ver == "" {
+		return "", "", false
+	}
+	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/CHANGELOG.md", repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", false
+	}
+	req.Header.Set("User-Agent", "grokcli-2api/"+buildinfo.Version)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", "", false
+	}
+	return parseChangelogText(string(raw), ver)
+}
+
+func localChangelogNotes(ver string) (string, string) {
+	ver = strings.TrimPrefix(strings.TrimSpace(ver), "v")
+	paths := []string{"/app/CHANGELOG.md", "CHANGELOG.md", "../CHANGELOG.md"}
+	var content []byte
+	for _, p := range paths {
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			content = b
+			break
+		}
+	}
+	if len(content) > 0 {
+		if title, notes, ok := parseChangelogText(string(content), ver); ok {
+			return title, notes
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if title, notes, ok := fetchRemoteChangelogNotes(ctx, ghReleaseRepo(), ver); ok {
+		return title, notes
+	}
+	return fmt.Sprintf("v%s 最新稳定版", ver), "已运行当前最新版本。"
 }
 
 func fetchGitHubLatestTag(ctx context.Context, repo string) (tag, htmlURL string, err error) {
