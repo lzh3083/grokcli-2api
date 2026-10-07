@@ -204,8 +204,17 @@ def is_dynamic_proxy(value: str | None) -> bool:
         if text.startswith(prefix):
             text = text[len(prefix):]
             break
-    token = text.rstrip("/").split(":")[0].split("-")[0].split("_")[0]
-    return token in DYNAMIC_PROXY_SENTINELS
+    clean = text.rstrip("/")
+    if not clean:
+        return False
+    token = clean.split(":")[0].split("-")[0].split("_")[0]
+    if token in DYNAMIC_PROXY_SENTINELS:
+        return True
+    if any(k in clean for k in ("novproxy", "residential", "dynamic")):
+        # If it has no dots or starts with sentinel keyword (e.g. novproxy-jp)
+        if "." not in clean or clean.startswith("novproxy"):
+            return True
+    return False
 
 
 def is_direct_proxy(value: str | None) -> bool:
@@ -290,11 +299,13 @@ def parse_proxy_pool(
     out: list[str] = []
     seen: set[str] = set()
     for line in lines:
+        if is_dynamic_proxy(line) or is_direct_proxy(line):
+            continue
         try:
             url = canonicalize_proxy_line(line, username=user_s, password=pass_s)
         except Exception:
             continue
-        if url and url not in seen:
+        if url and not is_dynamic_proxy(url) and not is_direct_proxy(url) and url not in seen:
             seen.add(url)
             out.append(url)
     return out
@@ -462,13 +473,15 @@ def _mask_proxy_url(url: str) -> str:
 def httpx_proxy_arg(proxy_url: str | None) -> str | None:
     """httpx Client(proxy=...) expects a single URL string (or None)."""
     s = (proxy_url or "").strip()
-    return s or None
+    if not s or is_direct_proxy(s) or is_dynamic_proxy(s):
+        return None
+    return s
 
 
 def curl_proxies_arg(proxy_url: str | None) -> dict[str, str] | None:
     """curl_cffi / requests style proxies dict."""
     s = (proxy_url or "").strip()
-    if not s:
+    if not s or is_direct_proxy(s) or is_dynamic_proxy(s):
         return None
     return {"http": s, "https": s}
 

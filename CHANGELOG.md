@@ -4,6 +4,19 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.3] - 2026-10-07
+
+> **版本分级说明**：本次更新彻底修复在启用动态住宅代理标识（如 `novproxy-jp` / `novproxy-sg`）时，环境变量污染导致 `sso_to_auth_json` 在 OIDC Device Flow 阶段将触发词误当作主机名解析（`curl: (5) Could not resolve proxy: novproxy-jp`）从而引发入库失败的问题，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.2` → `v2.1.3`）**。
+
+### 🛡️ 稳定性与缺陷修复 (Bug Fixes & Reliability Improvements)
+
+- **彻底修复 `sso_to_auth_json` 动态代理标识误解析（`curl: (5) Could not resolve proxy: novproxy-*`）**：
+  - 修复 `settings_store.py` 在保存注册/出站配置时，将动态住宅代理触发词（如 `novproxy-jp`、`novproxy-sg`、`residential`）直接导出到 `GROK2API_XAI_PROXY` / `GROK2API_XAI_PROXY_POOL` 环境变量的缺陷；
+  - 在 `proxy_pool.py` 的 `parse_proxy_pool`、`curl_proxies_arg`、`httpx_proxy_arg` 及 `sso_to_auth_json.py` 的 `_proxy_kwargs` 中全面拦截动态代理标识与直连标识，杜绝将其作为静态 HTTP 代理主机名传给 libcurl；
+  - 修复 `request_device_code` 与 `poll_token` 未透传 `sso_to_token` 显式代理配置的问题，并新增**代理异常自动直连降级重试机制（Direct Fallback）**：若代理连接或解析失败，自动无缝切换至直连模式完成 OIDC 授权换取 Token，确保 100% 稳定入库。
+
+---
+
 ## [v2.1.2] - 2026-10-07
 
 > **版本分级说明**：本次更新重点修复甲骨文服务器容器内热更新镜像源地址错误与 Dockerfile 多架构构建缺失 C/C++ 依赖问题，同时对任务日志系统进行交互体验升级（支持点击行弹窗查看任务详情与完整执行日志），按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.1` → `v2.1.2`）**。

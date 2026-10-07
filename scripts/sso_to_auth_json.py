@@ -121,52 +121,77 @@ def _is_rate_limited_payload(text: str | None = None, url: str | None = None, st
 
 
 
-def _proxy_kwargs() -> dict:
-    """Return curl_cffi compatible proxy kwargs from env / proxy pool."""
+def _proxy_kwargs(proxy_or_url: str | None = None) -> dict:
+    """Return curl_cffi compatible proxy kwargs from explicit proxy / env / proxy pool.
+
+    Guarantees that dynamic residential sentinels (e.g. novproxy-jp) and direct
+    sentinels are never passed to curl/requests as hostnames, avoiding curl error 5.
+    """
     try:
+        from grok2api.upstream.proxy_pool import (
+            resolve_proxy_for_request,
+            curl_proxies_arg,
+            get_outbound_proxy_source,
+            first_working_proxy,
+            is_direct_proxy,
+            is_dynamic_proxy,
+        )
+    except Exception:
         try:
-            from grok2api.upstream.proxy_pool import (
+            from proxy_pool import (  # type: ignore
                 resolve_proxy_for_request,
                 curl_proxies_arg,
                 get_outbound_proxy_source,
                 first_working_proxy,
                 is_direct_proxy,
+                is_dynamic_proxy,
             )
         except Exception:
-            from proxy_pool import (  # type: ignore
-                resolve_proxy_for_request,
-                curl_proxies_arg,
-                is_direct_proxy,
-            )
+            is_direct_proxy = lambda _x: str(_x or "").strip().lower() in ("direct", "none", "off", "0")  # noqa: E731
+            is_dynamic_proxy = lambda _x: "novproxy" in str(_x or "").lower() or "residential" in str(_x or "").lower()  # noqa: E731
+            resolve_proxy_for_request = lambda **_k: None  # noqa: E731
+            curl_proxies_arg = lambda _p: {"http": _p, "https": _p} if _p else None  # noqa: E731
             get_outbound_proxy_source = None  # type: ignore
             first_working_proxy = None  # type: ignore
 
+    if proxy_or_url:
+        p = str(proxy_or_url).strip()
+        if not is_direct_proxy(p) and not is_dynamic_proxy(p):
+            prox = curl_proxies_arg(p)
+            if prox:
+                return {"proxies": prox}
+        return {}
+
+    try:
         url = resolve_proxy_for_request(fallback_env=True)
-        # A "direct"/"none"/"off" sentinel (bare or already wrapped as
-        # http://direct by older config) must not be handed to curl as a proxy:
-        # it would fail with "Could not resolve proxy: direct" and the whole
-        # device flow would look like an xAI rate limit.
-        if is_direct_proxy(url):
-            url = None
+        if url and not is_direct_proxy(url) and not is_dynamic_proxy(url):
+            proxies = curl_proxies_arg(url)
+            if proxies:
+                return {"proxies": proxies}
         if not url and get_outbound_proxy_source is not None:
             src = get_outbound_proxy_source() or {}
-            pool = [p for p in list(src.get("pool") or []) if not is_direct_proxy(p)]
+            pool = [
+                p
+                for p in list(src.get("pool") or [])
+                if not is_direct_proxy(p) and not is_dynamic_proxy(p)
+            ]
             url = pool[0] if pool else None
         if not url and first_working_proxy is not None:
             candidate = first_working_proxy()
-            url = None if is_direct_proxy(candidate) else candidate
-        proxies = curl_proxies_arg(url)
-        if proxies:
-            return {"proxies": proxies}
+            url = None if (is_direct_proxy(candidate) or is_dynamic_proxy(candidate)) else candidate
+        if url and not is_direct_proxy(url) and not is_dynamic_proxy(url):
+            proxies = curl_proxies_arg(url)
+            if proxies:
+                return {"proxies": proxies}
     except Exception:
         pass
+
     proxy = (
         os.getenv("GROK2API_XAI_PROXY")
         or os.getenv("GROK2API_PROXY")
         or os.getenv("GROK_CLI_PROXY")
         or ""
     ).strip()
-    # Multi-line: take first non-empty line.
     if "\n" in proxy or "\r" in proxy:
         proxy = next(
             (
@@ -176,14 +201,12 @@ def _proxy_kwargs() -> dict:
             ),
             "",
         )
-    try:
-        from grok2api.upstream.proxy_pool import is_direct_proxy as _is_direct
-    except Exception:
-        from proxy_pool import is_direct_proxy as _is_direct  # type: ignore
-    if _is_direct(proxy):
+    if is_direct_proxy(proxy) or is_dynamic_proxy(proxy):
         return {}
     if proxy:
-        return {"proxies": {"http": proxy, "https": proxy}}
+        prox = curl_proxies_arg(proxy)
+        if prox:
+            return {"proxies": prox}
     return {}
 
 
@@ -235,7 +258,7 @@ def _poll_interval_sec(raw: Any = None) -> float:
     return max(0.4, min(hinted, 1.5))
 
 
-def request_device_code(session: Any | None = None) -> dict | None:
+def request_device_code(session: Any | None = None, proxy_kw: dict | None = None) -> dict | None:
     """Request OIDC device code. Prefer shared curl_cffi session when given.
 
     Retries on xAI rate limits (HTTP 429 / slow_down) — common when several
@@ -245,6 +268,7 @@ def request_device_code(session: Any | None = None) -> dict | None:
     timeout = _http_timeout()
     retries = _device_flow_retries()
     last_err = ""
+    effective_proxy_kw = proxy_kw if proxy_kw is not None else _proxy_kwargs()
     for attempt in range(1, retries + 1):
         _wait_device_flow_slot()
         if session is not None:
@@ -255,7 +279,7 @@ def request_device_code(session: Any | None = None) -> dict | None:
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=timeout,
-                    **_proxy_kwargs(),
+                    **effective_proxy_kw,
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 body = (getattr(r, "text", None) or "")[:300]
@@ -271,7 +295,11 @@ def request_device_code(session: Any | None = None) -> dict | None:
             except Exception as e:  # noqa: BLE001
                 last_err = str(e)
                 print(f"  ❌ device/code: {e}")
-                if attempt < retries and _is_rate_limited_payload(str(e)):
+                # Fallback to direct connection if proxy failed to resolve or connect
+                if effective_proxy_kw and any(k in str(e).lower() for k in ("proxy", "could not resolve", "connection refused")):
+                    print("  ⚠️ 检测到代理网络异常，自动切换为直连 (direct) 重试 device/code...")
+                    effective_proxy_kw = {}
+                if attempt < retries and (_is_rate_limited_payload(str(e)) or not effective_proxy_kw):
                     time.sleep(_device_flow_backoff_sec(attempt))
                     continue
                 return None
@@ -314,6 +342,7 @@ def poll_token(
     *,
     session: Any | None = None,
     immediate: bool = True,
+    proxy_kw: dict | None = None,
 ) -> dict | None:
     """Exchange an approved device_code for tokens.
 
@@ -330,6 +359,7 @@ def poll_token(
         "device_code": device_code,
     }
     http_timeout = _http_timeout()
+    effective_proxy_kw = proxy_kw if proxy_kw is not None else _proxy_kwargs()
     first = True
     while time.time() < deadline:
         if not (first and immediate):
@@ -344,7 +374,7 @@ def poll_token(
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=http_timeout,
-                    **_proxy_kwargs(),
+                    **effective_proxy_kw,
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 if code < 400:
@@ -363,6 +393,8 @@ def poll_token(
                 print(f"  ❌ token: {error or f'HTTP {code}'}")
                 return None
             except Exception as e:  # noqa: BLE001
+                if effective_proxy_kw and any(k in str(e).lower() for k in ("proxy", "could not resolve", "connection refused")):
+                    effective_proxy_kw = {}
                 # Transient network blip — retry until deadline.
                 if time.time() >= deadline:
                     print(f"  ❌ token network: {e}")
@@ -417,11 +449,8 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
     if not raw_sso:
         return None
 
-    # Resolve proxy kwargs: explicit proxy > pool / env
-    if proxy:
-        proxy_kw = {"proxies": {"http": proxy, "https": proxy}}
-    else:
-        proxy_kw = _proxy_kwargs()
+    # Resolve proxy kwargs: explicit proxy > pool / env (filters dynamic & direct sentinels)
+    proxy_kw = _proxy_kwargs(proxy)
 
     last_error_note = ""
     for attempt in range(1, retries + 1):
@@ -432,9 +461,12 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
             s.cookies.set("sso", raw_sso, domain=dom)
             s.cookies.set("sso-rw", raw_sso, domain=dom)
 
-        dc = request_device_code(session=s)
+        dc = request_device_code(session=s, proxy_kw=proxy_kw)
         if not dc or not dc.get("device_code"):
             last_error_note = "device_code_empty"
+            if proxy_kw:
+                log("  ⚠️ 代理请求 device/code 失败，切换至直连模式重试...")
+                proxy_kw = {}
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
@@ -490,6 +522,8 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
         except Exception as e:
             last_error_note = f"verify_exception_{e}"
             log(f"  ❌ verify 异常: {e}")
+            if proxy_kw:
+                proxy_kw = {}
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
@@ -529,6 +563,8 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
         except Exception as e:
             last_error_note = f"approve_exception_{e}"
             log(f"  ❌ approve 异常: {e}")
+            if proxy_kw:
+                proxy_kw = {}
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
                 continue
@@ -542,6 +578,7 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
             timeout=float(os.getenv("GROK2API_SSO_POLL_TIMEOUT", "45") or 45),
             session=s,
             immediate=True,
+            proxy_kw=proxy_kw,
         )
         if not token:
             last_error_note = "token_poll_empty"

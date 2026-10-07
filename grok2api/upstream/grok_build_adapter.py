@@ -3758,11 +3758,22 @@ def _run_registration(
 
         import scripts.sso_to_auth_json as sso_import
 
+        conv_proxy: str | None = str(sess.get("resolved_proxy") or sess.get("proxy") or "").strip() or None
+        try:
+            from grok2api.upstream.proxy_pool import is_direct_proxy as _dp, is_dynamic_proxy as _dyp
+            if conv_proxy and (_dp(conv_proxy) or _dyp(conv_proxy)):
+                conv_proxy = None
+        except Exception:
+            if conv_proxy and ("novproxy" in conv_proxy.lower() or "direct" in conv_proxy.lower()):
+                conv_proxy = None
+
         token = None
         max_df_tries = 4
         df_backoffs = (5.0, 8.0, 12.0)
         for _df_try in range(max_df_tries):
             if _df_try > 0:
+                # On retry, fallback to direct connection if proxy failed on first try
+                conv_proxy = None
                 wait_sec = df_backoffs[_df_try - 1] if _df_try - 1 < len(df_backoffs) else 10.0
                 update(
                     "importing",
@@ -3770,7 +3781,7 @@ def _run_registration(
                 )
                 time.sleep(wait_sec)
             try:
-                token = sso_import.sso_to_token(sso)
+                token = sso_import.sso_to_token(sso, proxy=conv_proxy)
             except Exception as _dfe:
                 print(f"[grok-build-auth] WARN: sso_to_token attempt {_df_try + 1} error: {_dfe}", flush=True)
                 token = None

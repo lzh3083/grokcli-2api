@@ -2813,14 +2813,21 @@ def apply_registration_config_to_runtime(cfg: dict[str, Any] | None = None) -> N
             os.environ.pop("YESCAPTCHA_API_KEY", None)
     # Mirror full multi-line text into both pool + legacy single-proxy envs.
     # Adapter / SSO helpers still read GROK2API_XAI_PROXY for first-proxy fallback.
-    if proxy:
-        _set_env("GROK2API_XAI_PROXY_POOL", proxy)
-        # Keep first usable line in the classic single-proxy env for older paths.
-        first_line = next(
-            (ln.strip() for ln in proxy.replace("\r", "\n").split("\n") if ln.strip() and not ln.strip().startswith("#")),
-            proxy,
-        )
-        _set_env("GROK2API_XAI_PROXY", first_line)
+    # Dynamic residential triggers (e.g. novproxy-jp) or direct sentinels must NOT be exported as HTTP proxy URLs.
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy as _is_dir_p, is_dynamic_proxy as _is_dyn_p
+    except Exception:
+        _is_dir_p = lambda _x: False  # noqa: E731
+        _is_dyn_p = lambda _x: False  # noqa: E731
+
+    static_proxy_lines = [
+        ln.strip()
+        for ln in (proxy or "").replace("\r", "\n").split("\n")
+        if ln.strip() and not ln.strip().startswith("#") and not _is_dir_p(ln) and not _is_dyn_p(ln)
+    ]
+    if static_proxy_lines:
+        _set_env("GROK2API_XAI_PROXY_POOL", "\n".join(static_proxy_lines))
+        _set_env("GROK2API_XAI_PROXY", static_proxy_lines[0])
     else:
         os.environ.pop("GROK2API_XAI_PROXY_POOL", None)
         os.environ.pop("GROK2API_XAI_PROXY", None)
@@ -2856,22 +2863,11 @@ def apply_registration_config_to_runtime(cfg: dict[str, Any] | None = None) -> N
             except (TypeError, ValueError):
                 pass
         if hasattr(_cfg, "XAI_PROXY_POOL"):
-            _cfg.XAI_PROXY_POOL = proxy
+            _cfg.XAI_PROXY_POOL = "\n".join(static_proxy_lines) if static_proxy_lines else ""
         if hasattr(_cfg, "XAI_PROXY_STRATEGY"):
             _cfg.XAI_PROXY_STRATEGY = proxy_strategy
-        # Classic single-proxy field: first non-empty line for back-compat.
-        if proxy:
-            first_line = next(
-                (
-                    ln.strip()
-                    for ln in proxy.replace("\r", "\n").split("\n")
-                    if ln.strip() and not ln.strip().startswith("#")
-                ),
-                proxy,
-            )
-            _cfg.XAI_PROXY = first_line
-        else:
-            _cfg.XAI_PROXY = ""
+        # Classic single-proxy field: first static proxy for back-compat.
+        _cfg.XAI_PROXY = static_proxy_lines[0] if static_proxy_lines else ""
         _cfg.XAI_PROXY_USERNAME = proxy_user
         _cfg.XAI_PROXY_PASSWORD = proxy_pass
     except Exception:
@@ -3202,17 +3198,21 @@ def apply_outbound_proxy_config_to_runtime(
     if strategy not in {"round_robin", "random", "sticky"}:
         strategy = "round_robin"
 
-    if proxy:
-        _set_env("GROK2API_XAI_PROXY_POOL", proxy)
-        first_line = next(
-            (
-                ln.strip()
-                for ln in proxy.replace("\r", "\n").split("\n")
-                if ln.strip() and not ln.strip().startswith("#")
-            ),
-            proxy,
-        )
-        _set_env("GROK2API_XAI_PROXY", first_line)
+    try:
+        from grok2api.upstream.proxy_pool import is_direct_proxy as _is_dir_p, is_dynamic_proxy as _is_dyn_p
+    except Exception:
+        _is_dir_p = lambda _x: False  # noqa: E731
+        _is_dyn_p = lambda _x: False  # noqa: E731
+
+    static_proxy_lines = [
+        ln.strip()
+        for ln in (proxy or "").replace("\r", "\n").split("\n")
+        if ln.strip() and not ln.strip().startswith("#") and not _is_dir_p(ln) and not _is_dyn_p(ln)
+    ]
+
+    if static_proxy_lines:
+        _set_env("GROK2API_XAI_PROXY_POOL", "\n".join(static_proxy_lines))
+        _set_env("GROK2API_XAI_PROXY", static_proxy_lines[0])
     else:
         # Only clear pool envs when admin explicitly disabled/cleared outbound
         # config — do not wipe registration proxy envs if they share the same keys
@@ -3226,7 +3226,7 @@ def apply_outbound_proxy_config_to_runtime(
                 reg_proxy = str(reg.get("proxy") or "").strip()
             except Exception:
                 reg_proxy = ""
-            if not reg_proxy:
+            if not reg_proxy or _is_dir_p(reg_proxy) or _is_dyn_p(reg_proxy):
                 os.environ.pop("GROK2API_XAI_PROXY", None)
     if proxy_user:
         _set_env("GROK2API_XAI_PROXY_USERNAME", proxy_user)
@@ -3239,19 +3239,10 @@ def apply_outbound_proxy_config_to_runtime(
         import grok2api.config as _cfg
 
         if hasattr(_cfg, "XAI_PROXY_POOL"):
-            _cfg.XAI_PROXY_POOL = proxy
+            _cfg.XAI_PROXY_POOL = "\n".join(static_proxy_lines) if static_proxy_lines else ""
         if hasattr(_cfg, "XAI_PROXY_STRATEGY"):
             _cfg.XAI_PROXY_STRATEGY = strategy
-        if proxy:
-            first_line = next(
-                (
-                    ln.strip()
-                    for ln in proxy.replace("\r", "\n").split("\n")
-                    if ln.strip() and not ln.strip().startswith("#")
-                ),
-                proxy,
-            )
-            _cfg.XAI_PROXY = first_line
+        _cfg.XAI_PROXY = static_proxy_lines[0] if static_proxy_lines else ""
         _cfg.XAI_PROXY_USERNAME = proxy_user
         _cfg.XAI_PROXY_PASSWORD = proxy_pass
     except Exception:
