@@ -4,6 +4,35 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.0] - 2026-10-07
+
+> **版本分级说明**：本次更新引入全新的核心子系统「双模无人值守定时与低水位自动补齐注册调度器」，涉及 Python 守护引擎、Go 服务端路由透传、PostgreSQL 状态持久化及 Web 控制台可视化看板全链路升级，按语义化版本规范（SemVer）定级为 **功能大版本 / 次版本升级（Minor Version: `v2.0.11` → `v2.1.0`）**。
+
+### 🚀 重点功能与重大更新 (Major Features - Minor Version Upgrade)
+
+- **无人值守双模定时与自动补齐注册调度器 (`AutoRegisterScheduler`)**：
+  - **随机时间间隔慢速保鲜模式 (`interval` / `both`)**：支持自定义最小与最大间隔区间（默认 `60~180` 分钟），每轮完成后在区间内动态随机抽取下一轮等待秒数，彻底打散固定周期的 Cron 机器人请求特征，规避 Cloudflare 与 xAI 频率风控。
+  - **账号池低水位自动补齐模式 (`watermark` / `both`)**：后台常驻监测 PostgreSQL 账号池实时可用数量（`pool.live`）；一旦跌破最低警戒水位（默认 `20` 个），立即抢占触发自动补齐任务，按单次批次逐步拉升至目标恢复水位（默认 `30` 个），并内置波次冷却时间（默认 `15` 分钟）。
+  - **账号池容量上限保护 (`max_pool_size`)**：当池内可用账号达到设定上限（默认 `100` 个）时，定时任务自动进入待命状态跳过本轮注册，防止无节制消耗代理流量与邮箱配额。
+  - **连续失败安全熔断 (`Circuit Breaker`)**：当连续 N 轮（默认 `3` 次）自动注册均未成功入库任何可用账号时，自动触发熔断停机并在管理面板横幅告警，杜绝因代理失效或上游接口变更导致死循环空转。
+  - **并发互斥锁与状态持久化**：与管理员手动发起的批量/单次注册共享会话互斥锁，检测到已有活跃注册任务时自动延后避让；调度器配置、运行阶段、熔断状态及最近 50 条历史记录全量持久化至 PostgreSQL `app_settings`。
+- **Go 服务端与 Python Sidecar 全链路调度 API**：
+  - 新增 `GET / PUT / POST /admin/api/accounts/register-email/scheduler`、`POST .../scheduler/trigger`（立即执行一轮）、`POST .../scheduler/reset`（重置熔断）标准管理端点及兼容回退通道。
+- **Web 管理面板「定时与自动补齐注册」可视化看板**：
+  - 在「账号管理 → 协议注册」页面新增定时调度配置与实时监控卡片，支持秒级倒计时刷新、实时可用水位展示、一键立即触发、一键重置熔断以及最近调度历史记录明细表。
+
+### 🛡️ 稳定性、安全性与协议修复 (Stability & Security Fixes)
+
+- **SSO 凭证前置持久化与 `sso_to_auth_json` 自动退避重试**：
+  - 在执行 `sso_to_token` 设备流转换前，优先将注册所得原始 SSO Cookie 落盘备份至 `data/register_sso/`，彻底防止转换瞬时报错导致新注册账号丢失。
+  - 为 `sso_to_token` 增加最多 3 次自动退避重试（间隔 4 秒），显著降低 xAI Device Flow 偶发 `slow_down / rate_limited` 导致的入库失败率。
+- **代理池动态住宅哨兵与预检优化**：
+  - 增强 `proxy_pool.py` 与 `browser_register_adapter.py` 对 `novproxy` / `residential` 动态代理哨兵的识别及多地区（SG / JP / US）自适应提取；默认关闭非必要的破坏性预检请求并隔离本地 Turnstile Solver `API_KEY`。
+- **全面安全加固与流式协议缺陷修复 (P0–P3)**：
+  - 修复热更新脚本参数校验、管理端 Cookie `Secure` 属性、`write_auth_map` 行级安全 `UPSERT`、并行首字节探测独立 Context 隔离及 Anthropic / Responses 流式工具调用内容保留问题。
+
+---
+
 ## [v2.0.11] - 2026-10-03
 
 ### 🚀 重点功能与重大更新 (Major Improvements)
