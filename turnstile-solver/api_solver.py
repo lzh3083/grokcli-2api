@@ -1303,7 +1303,8 @@ class TurnstileAPIServer:
 
                     locator = page.locator('input[name="cf-turnstile-response"]')
                     click_count = 0
-                    max_clicks = 12
+                    max_clicks = 4
+                    last_click_time = 0.0
                     # Mid-round re-inject once if token field never appears.
                     reinjected = False
 
@@ -1322,7 +1323,7 @@ class TurnstileAPIServer:
                             if count == 0:
                                 if (
                                     not reinjected
-                                    and attempt >= 8
+                                    and attempt >= 18
                                     and round_i < rounds
                                 ):
                                     # Soft re-inject before full context restart.
@@ -1415,13 +1416,19 @@ class TurnstileAPIServer:
                                             )
                                         continue
 
-                            if attempt > 1 and attempt % 2 == 0 and click_count < max_clicks:
+                            now_t = time.time()
+                            if (
+                                attempt > 1
+                                and click_count < max_clicks
+                                and (now_t - last_click_time) >= 6.0
+                            ):
                                 try:
                                     await self._dismiss_cookie_banners(page, index)
                                 except Exception:
                                     pass
                                 click_success = await self._try_click_strategies(page, index)
                                 click_count += 1
+                                last_click_time = now_t
                                 if click_success and self.debug:
                                     logger.debug(
                                         f"Browser {index}: Click successful "
