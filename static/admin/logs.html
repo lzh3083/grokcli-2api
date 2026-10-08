@@ -147,7 +147,7 @@
   <div class="g2a-card-head">
     <div>
       <h3>任务日志</h3>
-      <p>后台 / 长任务结果（协议注册、SSO 导入、测活、Token 续期等），保存在 PostgreSQL，可按类型 / 状态 / 关键词查询；点击任意行可直接弹出任务执行日志与完整明细。</p>
+      <p>后台 / 长任务结果（协议注册、定时注册、SSO 导入、测活、Token 续期等），保存在 PostgreSQL，可按类型 / 状态 / 关键词查询；点击任意行可直接弹出任务执行日志与完整明细。</p>
     </div>
     <div class="g2a-actions">
       <button class="g2a-btn g2a-btn-default" id="btn-logs-reload">刷新</button>
@@ -162,6 +162,8 @@
       <label for="logs-action">类型</label>
       <select id="logs-action" class="g2a-input">
         <option value="all">全部</option>
+        <option value="register">register</option>
+        <option value="auto_register">auto_register</option>
       </select>
     </div>
     <div class="g2a-field" style="min-width:140px">
@@ -220,6 +222,6 @@
   <script src="/static/dist/api.9ac71f7ed9.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/auth.fa7b1e0e4d.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.d8efcd6b00.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.47f1ff2dd1.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>

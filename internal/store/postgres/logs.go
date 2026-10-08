@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var knownTaskKinds = []string{"register", "sso_import", "json_import", "json_export", "probe", "renew"}
+var knownTaskKinds = []string{"register", "auto_register", "sso_import", "json_import", "json_export", "probe", "renew"}
 
 func (c *Connector) ListTasks(ctx context.Context, page, pageSize int, q, kind, status string) (map[string]any, error) {
 	if page < 1 {

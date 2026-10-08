@@ -24,6 +24,40 @@ TERMINAL_SESSION_STATUSES = frozenset({
     "timed_out", "timeout",
 })
 
+
+def _record_auto_reg_task(
+    *,
+    task_id: str,
+    status: str,
+    summary: str,
+    progress_done: int = 0,
+    progress_total: int = 0,
+    finished: bool = False,
+    ok: bool | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Write scheduled registration progress/outcome into PostgreSQL task_logs."""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return
+    try:
+        import grok2api.admin.task_log as task_log
+
+        task_log.record(
+            "auto_register",
+            task_id=tid,
+            summary=str(summary or f"定时注册 {tid}")[:500],
+            status=str(status or "done"),
+            ok=ok,
+            progress_done=int(progress_done or 0),
+            progress_total=int(progress_total or 0),
+            finished=bool(finished),
+            detail=detail if isinstance(detail, dict) else {},
+        )
+    except Exception:
+        pass
+
+
 DEFAULT_AUTO_REGISTER_CONFIG: dict[str, Any] = {
     "auto_register_enabled": False,
     "auto_register_mode": "both",  # "both" | "interval" | "watermark"
@@ -160,8 +194,65 @@ class AutoRegisterScheduler:
                         ):
                             if k in saved and saved[k] is not None:
                                 self._state[k] = saved[k]
+                    # Backfill historical scheduler runs into task_logs if missing
+                    self._backfill_history_to_task_logs(saved.get("history"))
         except Exception as exc:
             logger.warning("Failed to load persisted scheduler state: %s", exc)
+
+    def _backfill_history_to_task_logs(self, history: list[dict[str, Any]] | None) -> None:
+        if not isinstance(history, list) or not history:
+            return
+        try:
+            from grok2api.store.pg import connection, json_dump
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    for item in reversed(history):
+                        if not isinstance(item, dict):
+                            continue
+                        fin_at = item.get("finished_at")
+                        if not fin_at:
+                            continue
+                        tid = item.get("batch_id") or (
+                            item.get("session_ids")[0] if isinstance(item.get("session_ids"), list) and item.get("session_ids") else None
+                        ) or f"auto_reg_{int(fin_at)}"
+                        cur.execute(
+                            "SELECT id FROM task_logs WHERE kind = 'auto_register' AND task_id = %s LIMIT 1",
+                            (str(tid),),
+                        )
+                        if cur.fetchone():
+                            continue
+                        ok = bool(item.get("ok"))
+                        st = "done" if ok else ("partial" if int(item.get("imported") or 0) > 0 else "error")
+                        reason = item.get("reason") or "定时注册"
+                        msg = item.get("message") or ""
+                        summary = f"定时注册{'完成' if ok else '失败'}：{reason} · {msg}"
+                        cur.execute(
+                            """
+                            INSERT INTO task_logs (
+                              kind, task_id, status, summary, detail, ok,
+                              progress_done, progress_total, created_at, updated_at, finished_at
+                            ) VALUES (
+                              'auto_register', %s, %s, %s, %s::jsonb, %s,
+                              %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s)
+                            )
+                            """,
+                            (
+                                str(tid),
+                                st,
+                                summary[:500],
+                                json_dump(item),
+                                ok,
+                                int(item.get("imported") or 0),
+                                int(item.get("requested") or 0),
+                                float(fin_at),
+                                float(fin_at),
+                                float(fin_at),
+                            ),
+                        )
+                conn.commit()
+        except Exception as exc:
+            logger.debug("Failed to backfill scheduler history to task_logs: %s", exc)
+
 
     def _persist_state(self) -> None:
         try:
@@ -516,6 +607,30 @@ class AutoRegisterScheduler:
             if not settled:
                 with self._lock:
                     self._state["phase"] = "running_job"
+                    t_id = self._state.get("active_task_id") or self._state.get("active_batch_id")
+                    reason_s = self._state.get("last_trigger_reason") or "定时注册"
+                    req_cnt = int(self._state.get("active_requested_count") or 1)
+                    bid_s = self._state.get("active_batch_id")
+                    sids_s = list(self._state.get("active_session_ids") or [])
+                if t_id:
+                    done_now = imported_ok + failed_n
+                    _record_auto_reg_task(
+                        task_id=str(t_id),
+                        status="running",
+                        summary=f"定时注册进行中：{reason_s} · 进度 {done_now}/{req_cnt} (成功 {imported_ok} 失败 {failed_n})",
+                        progress_done=done_now,
+                        progress_total=req_cnt,
+                        finished=False,
+                        detail={
+                            "reason": reason_s,
+                            "requested": req_cnt,
+                            "imported": imported_ok,
+                            "failed": failed_n,
+                            "batch_id": bid_s,
+                            "session_ids": sids_s,
+                            "phase": "running",
+                        },
+                    )
                 return
 
             # Job finished! Record outcome
@@ -526,10 +641,12 @@ class AutoRegisterScheduler:
                 sids = list(self._state.get("active_session_ids") or [])
                 started_at = float(self._state.get("last_run_at") or now)
                 duration_s = max(1, int(now - started_at))
+                task_id = self._state.get("active_task_id") or batch_id or f"auto_reg_{int(started_at)}"
 
                 self._state["active_batch_id"] = None
                 self._state["active_session_ids"] = []
                 self._state["active_requested_count"] = 0
+                self._state["active_task_id"] = None
                 self._state["last_finish_at"] = now
 
                 if imported_ok > 0:
@@ -568,6 +685,18 @@ class AutoRegisterScheduler:
                 }
                 self._state["last_result"] = result_summary
                 self._append_history_locked(result_summary)
+
+                st_code = "done" if ok_flag else ("partial" if imported_ok > 0 else "error")
+                _record_auto_reg_task(
+                    task_id=str(task_id),
+                    status=st_code,
+                    summary=f"定时注册{'完成' if ok_flag else '失败'}：{reason} · {msg}",
+                    progress_done=imported_ok,
+                    progress_total=req_n,
+                    finished=True,
+                    ok=ok_flag,
+                    detail=result_summary,
+                )
 
                 if not self._state.get("circuit_broken"):
                     if cfg["auto_register_enabled"]:
@@ -738,6 +867,7 @@ class AutoRegisterScheduler:
                 sids = [str(x) for x in res["session_ids"] if x]
             elif res.get("id"):
                 sids = [str(res["id"])]
+            task_id = str(batch_id or (sids[0] if sids else f"auto_reg_{int(now)}"))
 
             with self._lock:
                 self._state["phase"] = "running_job"
@@ -746,13 +876,33 @@ class AutoRegisterScheduler:
                 self._state["active_batch_id"] = batch_id
                 self._state["active_session_ids"] = sids
                 self._state["active_requested_count"] = count
+                self._state["active_task_id"] = task_id
                 self._state["total_runs"] = int(self._state.get("total_runs") or 0) + 1
                 self._schedule_next_interval_locked(cfg)
                 self._schedule_next_watermark_locked(cfg)
             self._persist_state()
+
+            _record_auto_reg_task(
+                task_id=task_id,
+                status="running",
+                summary=f"定时注册启动：{reason} · 计划 {count} 个账号",
+                progress_done=0,
+                progress_total=count,
+                finished=False,
+                detail={
+                    "reason": reason,
+                    "requested": count,
+                    "batch_id": batch_id,
+                    "session_ids": sids,
+                    "started_at": now,
+                    "mode": cfg.get("auto_register_mode"),
+                    "phase": "started",
+                },
+            )
         except Exception as exc:
             err_msg = str(getattr(exc, "detail", None) or exc)[:200]
             print(f"[auto-reg-scheduler] Launch failed: {err_msg}", flush=True)
+            err_task_id = f"auto_reg_{int(now)}"
             with self._lock:
                 fails = int(self._state.get("consecutive_failures") or 0) + 1
                 self._state["consecutive_failures"] = fails
@@ -780,3 +930,14 @@ class AutoRegisterScheduler:
                     self._schedule_next_watermark_locked(cfg)
                     self._state["phase"] = "waiting"
             self._persist_state()
+
+            _record_auto_reg_task(
+                task_id=err_task_id,
+                status="error",
+                summary=f"定时注册启动失败：{reason} · 异常: {err_msg}",
+                progress_done=0,
+                progress_total=count,
+                finished=True,
+                ok=False,
+                detail=fail_item,
+            )

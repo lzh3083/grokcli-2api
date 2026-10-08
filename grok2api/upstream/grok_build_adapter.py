@@ -4909,6 +4909,14 @@ def reclaim_orphaned_registration_batches(
                     cur["updated_at"] = now_ts
                     _batches[bid] = cur
                     _mirror_reg_batch(bid, dict(cur))
+                _record_register_task(
+                    task_id=bid,
+                    summary=f"协议注册批次已取消 (watchdog): {bid}",
+                    status="cancelled",
+                    ok=False,
+                    finished=True,
+                    detail={"batch_id": bid, "reclaimed": True},
+                )
                 skipped.append({"batch_id": bid, "reason": "finalized_cancelled", "status": "cancelled"})
                 continue
             skipped.append({"batch_id": bid, "reason": "cancel_requested", "status": st})
@@ -5153,6 +5161,15 @@ def stop_registration_session(session_id: str) -> dict[str, Any]:
         _sessions[sid] = cur
         _mirror_reg_sess(sid, cur, force=True)
         out = _compact_session(cur)
+    if out.get("status") in ("cancelled", "stopped"):
+        _record_register_task(
+            task_id=sid,
+            summary=f"协议注册会话已取消: {sid}",
+            status=str(out.get("status") or "cancelled"),
+            ok=False,
+            finished=True,
+            detail={"session_id": sid, "stopped_by": "user"},
+        )
     return {"ok": True, "id": sid, **out}
 
 
@@ -5222,6 +5239,15 @@ def stop_registration_batch(batch_id: str) -> dict[str, Any]:
         _batches[bid] = b
         _mirror_reg_batch(bid, dict(b))
         out = dict(b)
+    if out.get("status") in ("cancelled", "stopped"):
+        _record_register_task(
+            task_id=bid,
+            summary=f"协议注册批次已取消: {bid}",
+            status=str(out.get("status") or "cancelled"),
+            ok=False,
+            finished=True,
+            detail={"batch_id": bid, "stopped_by": "user"},
+        )
     return {
         "ok": True,
         "batch_id": bid,
