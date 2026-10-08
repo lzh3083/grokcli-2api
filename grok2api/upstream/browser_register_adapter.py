@@ -366,7 +366,7 @@ def run_browser_registration(
             if detected_zone:
                 _log_cb(f"[*] {us_consistency.describe()}")
 
-        _log_cb("[*] 正在启动 Chromium 浏览器实例...")
+        _log_cb(f"[*] 正在启动注册浏览器实例 (engine={browser_runtime.browser_engine()})...")
         use_proxy = not is_direct
         registration_browser.start_browser(log_callback=_log_cb, use_proxy=use_proxy)
         check_cancel()

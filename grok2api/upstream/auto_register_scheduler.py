@@ -637,26 +637,48 @@ class AutoRegisterScheduler:
                     req_cnt = int(self._state.get("active_requested_count") or 1)
                     bid_s = self._state.get("active_batch_id")
                     sids_s = list(self._state.get("active_session_ids") or [])
-                if t_id:
-                    done_now = imported_ok + failed_n
-                    _record_auto_reg_task(
-                        task_id=str(t_id),
-                        status="running",
-                        summary=f"定时注册进行中：{reason_s} · 进度 {done_now}/{req_cnt} (成功 {imported_ok} 失败 {failed_n})",
-                        progress_done=done_now,
-                        progress_total=req_cnt,
-                        finished=False,
-                        detail={
-                            "reason": reason_s,
-                            "requested": req_cnt,
-                            "imported": imported_ok,
-                            "failed": failed_n,
-                            "batch_id": bid_s,
-                            "session_ids": sids_s,
-                            "phase": "running",
-                        },
+                    started_at_check = float(self._state.get("last_run_at") or now)
+
+                elapsed_check = now - started_at_check
+                max_job_timeout = max(1200, req_cnt * 480)
+                if elapsed_check >= max_job_timeout:
+                    print(
+                        f"[auto-reg-scheduler] job {bid_s or t_id} timed out after {int(elapsed_check)}s "
+                        f"(limit={max_job_timeout}s), forcing termination",
+                        flush=True,
                     )
-                return
+                    try:
+                        from grok2api.upstream import grok_build_adapter as reg
+                        if bid_s:
+                            reg.stop_registration_batch(str(bid_s))
+                        for sid_item in sids_s:
+                            reg.stop_registration_session(str(sid_item))
+                    except Exception:
+                        pass
+                    settled = True
+                    failed_n = max(failed_n, max(0, req_cnt - imported_ok))
+                    notes.append(f"执行超时({int(elapsed_check)}s > {max_job_timeout}s)，已强制终止")
+                else:
+                    if t_id:
+                        done_now = imported_ok + failed_n
+                        _record_auto_reg_task(
+                            task_id=str(t_id),
+                            status="running",
+                            summary=f"定时注册进行中：{reason_s} · 进度 {done_now}/{req_cnt} (成功 {imported_ok} 失败 {failed_n})",
+                            progress_done=done_now,
+                            progress_total=req_cnt,
+                            finished=False,
+                            detail={
+                                "reason": reason_s,
+                                "requested": req_cnt,
+                                "imported": imported_ok,
+                                "failed": failed_n,
+                                "batch_id": bid_s,
+                                "session_ids": sids_s,
+                                "phase": "running",
+                            },
+                        )
+                    return
 
             # Job finished! Record outcome
             with self._lock:

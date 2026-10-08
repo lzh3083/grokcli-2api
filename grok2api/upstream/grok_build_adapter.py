@@ -2608,91 +2608,114 @@ def _spawn_batch_runner(
                     except Exception:
                         pass
 
+        pool = None
+        in_flight_start: dict[Any, float] = {}
         try:
             target_total = int((_load_reg_batch(bid) or {}).get("count") or remaining)
-            with ThreadPoolExecutor(
+            pool = ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix=f"gba-batch-{bid[-6:]}"
-            ) as pool:
-                while True:
-                    # Fill up to concurrency(+prefetch) only while not cancelled.
-                    while (
-                        next_i <= remaining
-                        and len(in_flight) < max_inflight
-                        and not _batch_cancel_requested()
-                    ):
-                        fut = pool.submit(_job, next_i)
-                        in_flight[fut] = next_i
-                        next_i += 1
-                        with _lock:
-                            bb = _batches.get(bid)
-                            if bb is not None:
-                                bb["inflight"] = len(in_flight)
-                                bb["updated_at"] = _now()
-                                if not bb.get("cancel_requested"):
-                                    bb["status"] = "running"
-                                bb["message"] = (
-                                    f"running {finished}/{target_total} done "
-                                    f"(ok={ok_n} fail={fail_n}, threads={workers}, "
-                                    f"inflight={len(in_flight)})"
+            )
+            while True:
+                # Fill up to concurrency(+prefetch) only while not cancelled.
+                while (
+                    next_i <= remaining
+                    and len(in_flight) < max_inflight
+                    and not _batch_cancel_requested()
+                ):
+                    fut = pool.submit(_job, next_i)
+                    in_flight[fut] = next_i
+                    in_flight_start[fut] = _now()
+                    next_i += 1
+                    with _lock:
+                        bb = _batches.get(bid)
+                        if bb is not None:
+                            bb["inflight"] = len(in_flight)
+                            bb["updated_at"] = _now()
+                            if not bb.get("cancel_requested"):
+                                bb["status"] = "running"
+                            bb["message"] = (
+                                f"running {finished}/{target_total} done "
+                                f"(ok={ok_n} fail={fail_n}, threads={workers}, "
+                                f"inflight={len(in_flight)})"
+                            )
+                            _mirror_reg_batch(bid, dict(bb))
+                            try:
+                                _throttle_task_log(
+                                    task_id=str(bid),
+                                    status="running",
+                                    summary=str(bb.get("message") or f"协议注册批次 {bid}"),
+                                    progress_done=int(finished or 0),
+                                    progress_total=int(target_total or 0),
+                                    finished=False,
+                                    ok=None,
+                                    detail={
+                                        "batch_id": bid,
+                                        "ok_count": ok_n,
+                                        "fail_count": fail_n,
+                                        "threads": workers,
+                                        "inflight": len(in_flight),
+                                        "phase": "progress",
+                                        "adapter_build": ADAPTER_BUILD,
+                                    },
+                                    min_interval_sec=1.5,
                                 )
-                                _mirror_reg_batch(bid, dict(bb))
-                                try:
-                                    _throttle_task_log(
-                                        task_id=str(bid),
-                                        status="running",
-                                        summary=str(bb.get("message") or f"协议注册批次 {bid}"),
-                                        progress_done=int(finished or 0),
-                                        progress_total=int(target_total or 0),
-                                        finished=False,
-                                        ok=None,
-                                        detail={
-                                            "batch_id": bid,
-                                            "ok_count": ok_n,
-                                            "fail_count": fail_n,
-                                            "threads": workers,
-                                            "inflight": len(in_flight),
-                                            "phase": "progress",
-                                            "adapter_build": ADAPTER_BUILD,
-                                        },
-                                        min_interval_sec=1.5,
-                                    )
-                                except Exception:
-                                    pass
+                            except Exception:
+                                pass
 
-                    if not in_flight:
-                        break
+                if not in_flight:
+                    break
 
-                    done, _pending = wait(
-                        set(in_flight.keys()),
-                        return_when=FIRST_COMPLETED,
-                        timeout=0.5,
-                    )
-                    if not done:
-                        # Timeout tick: re-check cancel and refresh progress.
-                        if _batch_cancel_requested():
-                            # Stop feeding new jobs; still drain in-flight workers.
-                            pass
-                        continue
-                    for fut in done:
-                        idx = in_flight.pop(fut, 0)
-                        try:
-                            r = fut.result()
-                            _note_result(idx, r=r)
-                        except Exception as e:  # noqa: BLE001
-                            _note_result(idx, exc=e)
+                done, _pending = wait(
+                    set(in_flight.keys()),
+                    return_when=FIRST_COMPLETED,
+                    timeout=0.5,
+                )
+                now_check = _now()
+                # 检查超时挂死的子任务（单个注册超过 420s 强制熔断）
+                for f_item in list(in_flight.keys()):
+                    if f_item not in done:
+                        t_started = in_flight_start.get(f_item, now_check)
+                        if (now_check - t_started) >= 420.0:
+                            f_idx = in_flight.pop(f_item, 0)
+                            in_flight_start.pop(f_item, None)
+                            try:
+                                f_item.cancel()
+                            except Exception:
+                                pass
+                            _note_result(f_idx, exc=TimeoutError("账号单任务执行超时 (420s)"))
 
-                    # If cancelled and no more work in flight, exit promptly.
-                    if _batch_cancel_requested() and not in_flight:
-                        break
-                    # If cancelled, do not submit more jobs even if capacity frees.
+                if not done:
+                    # Timeout tick: re-check cancel and refresh progress.
                     if _batch_cancel_requested():
-                        continue
+                        # Stop feeding new jobs; still drain in-flight workers.
+                        pass
+                    continue
+                for fut in done:
+                    idx = in_flight.pop(fut, 0)
+                    in_flight_start.pop(fut, None)
+                    try:
+                        r = fut.result()
+                        _note_result(idx, r=r)
+                    except Exception as e:  # noqa: BLE001
+                        _note_result(idx, exc=e)
+
+                # If cancelled and no more work in flight, exit promptly.
+                if _batch_cancel_requested() and not in_flight:
+                    break
+                # If cancelled, do not submit more jobs even if capacity frees.
+                if _batch_cancel_requested():
+                    continue
         finally:
             stop_renew = True
             # Best-effort cancel of any leftover futures (usually empty now).
             for fut in list(in_flight.keys()):
                 try:
                     fut.cancel()
+                except Exception:
+                    pass
+            if pool is not None:
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
             with _lock:
@@ -4752,24 +4775,39 @@ def resume_registration_batch(
         terminal = finished
     remaining = max(0, count - max(finished, terminal))
     if remaining <= 0:
+        final_finished = max(finished, terminal, count)
         with _lock:
             b = _batches.get(bid) or dict(batch)
+            b["finished"] = final_finished
             b["status"] = "done" if int(b.get("fail_count") or 0) == 0 else "partial"
             b["runner_alive"] = False
+            b["inflight"] = 0
             b["updated_at"] = _now()
             b["message"] = (
                 f"resume: nothing remaining "
-                f"(count={count} finished={finished} terminal={terminal})"
+                f"(count={count} finished={final_finished} terminal={terminal})"
             )
             _batches[bid] = b
             _mirror_reg_batch(bid, dict(b))
+        st_final = str(b.get("status") or "partial")
+        _record_register_task(
+            task_id=bid,
+            summary=f"finished {final_finished}/{count} (ok={int(b.get('ok_count') or 0)} fail={int(b.get('fail_count') or 0)})",
+            status=st_final,
+            ok=int(b.get("ok_count") or 0) > 0,
+            progress_done=final_finished,
+            progress_total=count,
+            finished=True,
+            detail={"batch_id": bid, "resumed_completed": True},
+        )
         return {
             "ok": True,
             "batch_id": bid,
             "remaining": 0,
+            "already_complete": True,
             "reclaimed": reclaimed.get("reclaimed") or 0,
             "message": "batch already complete",
-            "status": (_load_reg_batch(bid) or {}).get("status"),
+            "status": st_final,
         }
 
     cfg = batch.get("reg_config") if isinstance(batch.get("reg_config"), dict) else {}
@@ -5012,6 +5050,9 @@ def reclaim_orphaned_registration_batches(
             skipped.append({"batch_id": bid, "reason": "auto_resume_disabled", "status": st})
             continue
         r = resume_registration_batch(bid, force=True, reclaim_stale_sec=ttl)
+        if r.get("already_complete"):
+            skipped.append({"batch_id": bid, "reason": "already_complete_settled", "status": r.get("status")})
+            continue
         resumed.append(r)
 
     return {

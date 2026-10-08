@@ -1,6 +1,7 @@
 """管理主注册浏览器生命周期并实现注册页面自动化操作。"""
 import gc
 import json
+import os
 import random
 import re
 import secrets
@@ -414,6 +415,51 @@ return JSON.stringify({
     return None, "提交后 150 秒内没看到新图片（提交方式=%s，输入框=%s，提交前图片数=%d）；页面尾部: %s" % (
         sent, box_loc, len(before), last_tail.replace("\n", " ")[:220])
 
+def _kill_stale_registration_browser_procs():
+    """清理本进程派生但未正常退出的 node / camoufox-bin 浏览器孤儿进程，防止卡死。"""
+    try:
+        import os, signal
+        my_pid = os.getpid()
+        children_pids = set()
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                with open(f"/proc/{d}/stat", "r") as f:
+                    parts = f.read().split()
+                    ppid = int(parts[3])
+                    if ppid == my_pid:
+                        children_pids.add(int(d))
+            except Exception:
+                continue
+
+        descendants = set(children_pids)
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            pid_int = int(d)
+            if pid_int in descendants:
+                continue
+            try:
+                with open(f"/proc/{d}/stat", "r") as f:
+                    ppid = int(f.read().split()[3])
+                    if ppid in descendants:
+                        descendants.add(pid_int)
+            except Exception:
+                continue
+
+        for p in descendants:
+            try:
+                with open(f"/proc/{p}/comm", "r") as f:
+                    comm = f.read().strip()
+                if comm in ("node", "camoufox-bin", "chrome", "chromium"):
+                    os.kill(p, signal.SIGKILL)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def stop_browser_proxy_bridge():
     global browser_proxy_bridge
     if browser_proxy_bridge is not None:
@@ -427,6 +473,8 @@ def start_browser(log_callback=None, use_proxy=True):
     global browser, page, browser_proxy_bridge, browser_started_with_proxy
     last_exc = None
     proxy_enabled = bool(use_proxy and get_configured_proxy())
+    # 启动前先行清理残留的本进程游离浏览器子进程
+    _kill_stale_registration_browser_procs()
     for attempt in range(1, 5):
         bridge = None
         try:
@@ -452,14 +500,32 @@ def start_browser(log_callback=None, use_proxy=True):
                     pass
             engine = browser_runtime.browser_engine()
             options = create_browser_options(browser_proxy=browser_proxy)
-            if engine == "camoufox":
-                # Camoufox（加固版 Firefox，Juggler 协议 + 指纹伪造）能拿到
-                # cf_clearance；Chromium 走 CDP，2026-09-28 起必被 Cloudflare
-                # Bot Management 拦截，注册静默失败。
-                from camoufox_compat import CamoufoxBrowser
-                browser = CamoufoxBrowser(options)
-            else:
-                browser = Chromium(options)
+
+            # 45s 看门狗定时器，防止底层 Juggler / Node pipe 通信挂起导致线程无限期卡死
+            timer = None
+            def _watchdog_trigger():
+                if log_callback:
+                    log_callback(f"[!] 启动 {engine} 浏览器超过 45s，强杀挂起子进程以解除阻塞...")
+                _kill_stale_registration_browser_procs()
+
+            import threading
+            timer = threading.Timer(45.0, _watchdog_trigger)
+            timer.daemon = True
+            timer.start()
+
+            try:
+                if engine == "camoufox":
+                    # Camoufox（加固版 Firefox，Juggler 协议 + 指纹伪造）能拿到
+                    # cf_clearance；Chromium 走 CDP，2026-09-28 起必被 Cloudflare
+                    # Bot Management 拦截，注册静默失败。
+                    from camoufox_compat import CamoufoxBrowser
+                    browser = CamoufoxBrowser(options)
+                else:
+                    browser = Chromium(options)
+            finally:
+                if timer is not None:
+                    timer.cancel()
+
             browser_proxy_bridge = bridge
             browser_started_with_proxy = bool(browser_proxy)
             tabs = browser.get_tabs()
@@ -500,6 +566,7 @@ def start_browser(log_callback=None, use_proxy=True):
                     browser.quit(del_data=True)
             except Exception:
                 pass
+            _kill_stale_registration_browser_procs()
             browser = None
             page = None
             browser_proxy_bridge = None
@@ -516,6 +583,7 @@ def stop_browser():
             browser.quit(del_data=True)
         except Exception:
             pass
+    _kill_stale_registration_browser_procs()
     stop_browser_proxy_bridge()
     browser = None
     page = None
