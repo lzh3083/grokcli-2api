@@ -4,6 +4,27 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.4] - 2026-10-08
+
+> **版本分级说明**：本次更新重点修复定时注册调度器在保存配置与状态读取时出现的 `Put "http://127.0.0.1:18070/internal/registration/v1/scheduler": net/http: timeout awaiting response headers` 超时错误，根治 Camoufox/Playwright 浏览器在异常关闭/崩溃时内部 dispatcher fiber 死亡引发的 100% CPU 忙轮询死循环与全局解释器锁（GIL）饥饿问题，同时对 Go 端侧车通信客户端和 FastAPI 异步处理进行全链路加固，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.3` → `v2.1.4`）**。
+
+### 🛡️ 稳定性与缺陷修复 (Bug Fixes & Reliability Improvements)
+
+- **彻底根除 Playwright 内部死循环（100% CPU 与 GIL 锁霸占）**：
+  - **根因修复**：当底层浏览器进程因崩溃或主动关闭断开时，Playwright 同步包装器内部的 `_dispatcher_fiber` greenlet 已经死亡（`fiber.dead == True`）。`CamoufoxPage.run_js()` 在捕获到初始异常后盲目二次重试 `evaluate()`，致使 Playwright 的 `while not task.done(): self._dispatcher_fiber.switch()` 陷入死循环忙轮询，单核 CPU 占用持续 100%，并在多线程下长时间霸占 Python GIL，拖慢整个 Python 侧车达数秒之久。
+  - **双重熔断防御**：
+    1. 在 `camoufox_compat.py` 模块加载时对 Playwright `SyncBase._sync()` 注入安全守卫，一旦检测到 `_dispatcher_fiber.dead` 立即抛出异常拒绝死循环；
+    2. 在 `CamoufoxPage.run_js()` 中增加 `is_closed()` 与致命连接错误（`Target closed` / `Target crashed` / `Browser closed`）预检与拦截，严禁在已关闭的页面或已损坏的上下文中盲目二次重试。
+- **修复 Go 端侧车客户端超短超时限制（600ms ResponseHeaderTimeout）**：
+  - **根因修复**：Go 端 `sharedRegistrationHTTP` 专为前台轻量日志轮询设计（`Timeout: 750ms`, `ResponseHeaderTimeout: 600ms`），而调度器保存接口（`PUT /scheduler`）以及状态获取接口（`GET /scheduler`）涉及数据库 settings 表与账号池统计查询，此前却未走长超时客户端，导致任何微小的 I/O 抖动或 GIL 竞争都会直接被 600ms 掐断，抛出 `net/http: timeout awaiting response headers`。
+  - **客户端超时全面分级**：
+    1. 在 `internal/registration/client/client.go` 中，将所有 `PUT` 请求以及包含 `/scheduler` 与 `/availability` 的管理端点全部无缝切换至长超时客户端 `HTTPLong`（60s 超时，50s Header 超时）；
+    2. 将轻量快速轮询客户端的超时安全边际从 600ms 放宽至 2s Header 超时与 3s 总超时，避免极端抖动下的误杀。
+- **FastAPI 调度器异步路由解耦（Non-blocking to ThreadPool）**：
+  - 将 `scripts/registration_service.py` 中的 `scheduler_status`、`scheduler_update`、`scheduler_trigger`、`scheduler_reset` 及隧道操作改造为通过 `asyncio.to_thread` 调度至子线程池，彻底避免在 FastAPI 主事件循环中同步阻塞数据库 I/O。
+
+---
+
 ## [v2.1.3] - 2026-10-07
 
 > **版本分级说明**：本次更新彻底修复在启用动态住宅代理标识（如 `novproxy-jp` / `novproxy-sg`）时，环境变量污染导致 `sso_to_auth_json` 在 OIDC Device Flow 阶段将触发词误当作主机名解析（`curl: (5) Could not resolve proxy: novproxy-jp`）从而引发入库失败的问题，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.2` → `v2.1.3`）**。

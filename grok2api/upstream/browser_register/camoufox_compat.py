@@ -28,6 +28,34 @@ import re
 import time
 import urllib.parse
 
+
+def _patch_playwright_sync_base():
+    """Defend against Playwright spinning 100% CPU in _sync() when dispatcher fiber dies."""
+    try:
+        import playwright._impl._sync_base as sb
+
+        if getattr(sb, "_grok2api_patched", False):
+            return
+        orig_sync = sb.SyncBase._sync
+
+        def safe_sync(self, coro):
+            if self._loop.is_closed():
+                coro.close()
+                raise sb.Error("Event loop is closed! Is Playwright already stopped?")
+            fiber = getattr(self, "_dispatcher_fiber", None)
+            if fiber is not None and getattr(fiber, "dead", False):
+                coro.close()
+                raise sb.Error("Playwright dispatcher fiber is already dead!")
+            return orig_sync(self, coro)
+
+        sb.SyncBase._sync = safe_sync
+        sb._grok2api_patched = True
+    except Exception:
+        pass
+
+
+_patch_playwright_sync_base()
+
 __all__ = [
     "CamoufoxOptions",
     "CamoufoxBrowser",
@@ -339,6 +367,8 @@ class CamoufoxPage:
         只接受一个参数，所以多参数时把它打包成数组再用 ``apply`` 展开，
         这样 ``arguments`` 的位置语义与 DrissionPage 一致。
         """
+        if hasattr(self._page, "is_closed") and self._page.is_closed():
+            raise RuntimeError("Target page, context or browser has been closed")
         wrapped = _wrap_js(script)
         try:
             if not args:
@@ -350,6 +380,25 @@ class CamoufoxPage:
                 list(args),
             )
         except Exception as exc:
+            err_str = str(exc).lower()
+            if any(
+                k in err_str
+                for k in (
+                    "target closed",
+                    "target crashed",
+                    "browser closed",
+                    "page closed",
+                    "connection closed",
+                    "has been closed",
+                    "already dead",
+                )
+            ):
+                raise exc
+            try:
+                if hasattr(self._page, "is_closed") and self._page.is_closed():
+                    raise exc
+            except Exception:
+                raise exc
             # 少数脚本可能是表达式或依赖 IIFE，直接透传重试一次
             try:
                 return self._page.evaluate(script)

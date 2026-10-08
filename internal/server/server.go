@@ -4524,16 +4524,16 @@ var (
 
 func sharedRegistrationHTTP() *http.Client {
 	regHTTPClientOnce.Do(func() {
-		// Keep under browser REG_POLL_TIMEOUT_MS (~900ms) so a stuck sidecar never freezes the log UI.
+		// General registration sidecar polling client with reasonable headroom for system I/O jitters.
 		regHTTPClient = &http.Client{
-			Timeout: 750 * time.Millisecond,
+			Timeout: 3 * time.Second,
 			Transport: &http.Transport{
-				DialContext:           (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext,
+				DialContext:           (&net.Dialer{Timeout: 500 * time.Millisecond}).DialContext,
 				MaxIdleConns:          128,
 				MaxIdleConnsPerHost:   64,
 				MaxConnsPerHost:       64,
 				IdleConnTimeout:       90 * time.Second,
-				ResponseHeaderTimeout: 600 * time.Millisecond,
+				ResponseHeaderTimeout: 2 * time.Second,
 				ForceAttemptHTTP2:     true,
 			},
 		}

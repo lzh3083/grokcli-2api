@@ -965,17 +965,23 @@ async def probe_proxy_pool(request: Request) -> dict[str, Any]:
     # Backward-compatible tunnel for scheduler operations before Go binary rebuild
     sched_action = str(body.get("__scheduler_action") or "").strip().lower()
     if sched_action:
+        import asyncio
+
         sched = _get_scheduler()
         if sched is None:
             raise HTTPException(status_code=503, detail="scheduler unavailable")
         if sched_action == "status":
-            return _jsonable(sched.get_status())
+            res = await asyncio.to_thread(sched.get_status)
+            return _jsonable(res)
         if sched_action == "update":
-            return _jsonable(sched.update_config(body))
+            res = await asyncio.to_thread(sched.update_config, body)
+            return _jsonable(res)
         if sched_action == "trigger":
-            return _jsonable(sched.trigger_now(body.get("count")))
+            res = await asyncio.to_thread(sched.trigger_now, body.get("count"))
+            return _jsonable(res)
         if sched_action in ("reset", "reset_circuit"):
-            return _jsonable(sched.reset_circuit_breaker())
+            res = await asyncio.to_thread(sched.reset_circuit_breaker)
+            return _jsonable(res)
         raise HTTPException(status_code=400, detail=f"unknown scheduler action: {sched_action}")
 
     proxies = body.get("proxies") or []
@@ -1040,19 +1046,24 @@ def _on_startup() -> None:
 
 
 @app.get(f"{API_PREFIX}/scheduler")
-def scheduler_status(request: Request) -> dict[str, Any]:
+async def scheduler_status(request: Request) -> dict[str, Any]:
     _require_auth(request)
-    sched = _get_scheduler()
+    import asyncio
+
+    sched = await asyncio.to_thread(_get_scheduler)
     if sched is None:
         raise HTTPException(status_code=503, detail="scheduler unavailable")
-    return _jsonable(sched.get_status())
+    res = await asyncio.to_thread(sched.get_status)
+    return _jsonable(res)
 
 
 @app.put(f"{API_PREFIX}/scheduler")
 @app.post(f"{API_PREFIX}/scheduler")
 async def scheduler_update(request: Request) -> dict[str, Any]:
     _require_auth(request)
-    sched = _get_scheduler()
+    import asyncio
+
+    sched = await asyncio.to_thread(_get_scheduler)
     if sched is None:
         raise HTTPException(status_code=503, detail="scheduler unavailable")
     try:
@@ -1063,16 +1074,21 @@ async def scheduler_update(request: Request) -> dict[str, Any]:
         body = {}
     action = str(body.get("action") or "").strip().lower()
     if action == "trigger":
-        return _jsonable(sched.trigger_now(body.get("count")))
+        res = await asyncio.to_thread(sched.trigger_now, body.get("count"))
+        return _jsonable(res)
     if action in ("reset", "reset_circuit"):
-        return _jsonable(sched.reset_circuit_breaker())
-    return _jsonable(sched.update_config(body))
+        res = await asyncio.to_thread(sched.reset_circuit_breaker)
+        return _jsonable(res)
+    res = await asyncio.to_thread(sched.update_config, body)
+    return _jsonable(res)
 
 
 @app.post(f"{API_PREFIX}/scheduler/trigger")
 async def scheduler_trigger(request: Request) -> dict[str, Any]:
     _require_auth(request)
-    sched = _get_scheduler()
+    import asyncio
+
+    sched = await asyncio.to_thread(_get_scheduler)
     if sched is None:
         raise HTTPException(status_code=503, detail="scheduler unavailable")
     try:
@@ -1081,16 +1097,20 @@ async def scheduler_trigger(request: Request) -> dict[str, Any]:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    return _jsonable(sched.trigger_now(body.get("count")))
+    res = await asyncio.to_thread(sched.trigger_now, body.get("count"))
+    return _jsonable(res)
 
 
 @app.post(f"{API_PREFIX}/scheduler/reset")
 async def scheduler_reset(request: Request) -> dict[str, Any]:
     _require_auth(request)
-    sched = _get_scheduler()
+    import asyncio
+
+    sched = await asyncio.to_thread(_get_scheduler)
     if sched is None:
         raise HTTPException(status_code=503, detail="scheduler unavailable")
-    return _jsonable(sched.reset_circuit_breaker())
+    res = await asyncio.to_thread(sched.reset_circuit_breaker)
+    return _jsonable(res)
 
 
 @app.exception_handler(HTTPException)
