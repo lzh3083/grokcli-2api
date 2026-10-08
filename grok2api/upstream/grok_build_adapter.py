@@ -4589,12 +4589,18 @@ def reclaim_orphaned_registration_sessions(
                 min_age = min(max(75.0, ttl * 0.75), captcha_grace * 0.35, 180.0)
             else:
                 min_age = min(max(30.0, ttl / 3.0), 90.0)
+        # Stopping / cancel_requested sessions finalize to cancelled after 10s
+        if (st == "stopping" or sess.get("cancel_requested")) and age >= 10.0:
+            min_age = 10.0
         if age < min_age:
             continue
-        msg = (
-            f"reclaimed orphan session after {age:.0f}s "
-            f"(status was {st}; runner_alive={has_runner})"
-        )
+        if st == "stopping" or sess.get("cancel_requested"):
+            msg = f"cancelled stopping session after {age:.0f}s (runner_alive={has_runner})"
+        else:
+            msg = (
+                f"reclaimed orphan session after {age:.0f}s "
+                f"(status was {st}; runner_alive={has_runner})"
+            )
         with _lock:
             cur = _sessions.get(sid) or dict(sess)
             prev = str(cur.get("status") or "").strip().lower()
@@ -4606,9 +4612,13 @@ def reclaim_orphaned_registration_sessions(
             cur_age = now - float(cur.get("updated_at") or cur.get("created_at") or 0)
             if cur_age < min_age:
                 continue
-            cur["status"] = "error"
-            cur["error"] = msg
-            cur["message"] = msg
+            if st == "stopping" or sess.get("cancel_requested"):
+                cur["status"] = "cancelled"
+                cur["message"] = msg
+            else:
+                cur["status"] = "error"
+                cur["error"] = msg
+                cur["message"] = msg
             # Ask any still-alive worker to exit; do NOT bump batch finished here.
             # Bumping finished permanently consumes bulk slots that should be
             # retried after a dead runner, and can double-count when a live
@@ -4889,6 +4899,18 @@ def reclaim_orphaned_registration_batches(
         ):
             continue
         if b.get("cancel_requested") and st in {"stopping", "cancelled", "stopped"}:
+            if st == "stopping" and (batch_age >= 10.0 or not has_local):
+                with _lock:
+                    cur = _batches.get(bid) or dict(b)
+                    cur["status"] = "cancelled"
+                    cur["message"] = "cancelled by watchdog (stopped)"
+                    cur["runner_alive"] = False
+                    cur["inflight"] = 0
+                    cur["updated_at"] = now_ts
+                    _batches[bid] = cur
+                    _mirror_reg_batch(bid, dict(cur))
+                skipped.append({"batch_id": bid, "reason": "finalized_cancelled", "status": "cancelled"})
+                continue
             skipped.append({"batch_id": bid, "reason": "cancel_requested", "status": st})
             continue
         # Skip only if THIS process has a live runner. Redis locks from a dead
@@ -4988,8 +5010,10 @@ def _refresh_active_registration_ttls() -> int:
         st = str(b.get("status") or "").strip().lower()
         count = int(b.get("count") or 0)
         finished = int(b.get("finished") or 0)
-        active = st in {"running", "starting", "stopping", "partial"} or (
-            count > 0 and finished < count and st not in {"cancelled", "stopped", "done"}
+        if b.get("cancel_requested") or st in {"cancelled", "stopped", "done", "error"}:
+            continue
+        active = st in {"running", "starting", "partial"} or (
+            count > 0 and finished < count
         )
         if not active:
             continue
@@ -5100,8 +5124,13 @@ def stop_registration_session(session_id: str) -> dict[str, Any]:
     with _lock:
         cur = _sessions.get(sid) or dict(sess)
         cur["cancel_requested"] = True
-        cur["status"] = "stopping"
-        cur["message"] = "stop requested; waiting for worker to exit"
+        # If already stopping or not a locally active worker, finalize immediately as cancelled
+        if st == "stopping" or sid not in _sessions:
+            cur["status"] = "cancelled"
+            cur["message"] = "cancelled by user"
+        else:
+            cur["status"] = "stopping"
+            cur["message"] = "stop requested; waiting for worker to exit"
         cur["updated_at"] = _now()
         # Best-effort immediate release of process-local handles so Camoufox /
         # mailbox sockets do not linger until the worker next hits update().
@@ -5118,7 +5147,7 @@ def stop_registration_session(session_id: str) -> dict[str, Any]:
                         pass
                     break
         try:
-            _append_session_log(cur, "stopping", "stop requested")
+            _append_session_log(cur, cur.get("status") or "stopping", cur.get("message") or "stop requested")
         except Exception:
             pass
         _sessions[sid] = cur
@@ -5171,18 +5200,24 @@ def stop_registration_batch(batch_id: str) -> dict[str, Any]:
     with _lock:
         b = _batches.get(bid) or dict(batch)
         b["cancel_requested"] = True
-        if str(b.get("status") or "").lower() not in (
-            "done",
-            "partial",
-            "error",
-            "cancelled",
-            "stopped",
-        ):
-            b["status"] = "stopping"
-        b["message"] = (
-            f"stop requested: stopping={len(stopped)} "
-            f"already_done={len(already)} missing={len(missing)}"
-        )
+        if len(stopped) == 0:
+            b["status"] = "cancelled"
+            b["message"] = "cancelled by user"
+            b["runner_alive"] = False
+            b["inflight"] = 0
+        else:
+            if str(b.get("status") or "").lower() not in (
+                "done",
+                "partial",
+                "error",
+                "cancelled",
+                "stopped",
+            ):
+                b["status"] = "stopping"
+            b["message"] = (
+                f"stop requested: stopping={len(stopped)} "
+                f"already_done={len(already)} missing={len(missing)}"
+            )
         b["updated_at"] = _now()
         _batches[bid] = b
         _mirror_reg_batch(bid, dict(b))
