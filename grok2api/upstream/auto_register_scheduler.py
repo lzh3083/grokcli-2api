@@ -366,11 +366,16 @@ class AutoRegisterScheduler:
                 min_s = normalized["auto_register_min_interval_min"] * 60
                 max_s = normalized["auto_register_max_interval_min"] * 60
                 nxt = self._state.get("next_run_at")
-                if not nxt or nxt <= now or (nxt - now) > max_s:
+                prev_iv = int(self._state.get("next_interval_sec") or 0)
+                is_postponed_short = (
+                    self._state.get("phase") == "postponed"
+                    or (nxt and (nxt - now) <= 65 and prev_iv > 120)
+                )
+                if not nxt or nxt <= now or (nxt - now) > max_s or is_postponed_short:
                     chosen = int(random.uniform(min_s, max_s))
                     self._state["next_interval_sec"] = chosen
                     self._state["next_run_at"] = now + chosen
-                if self._state.get("phase") == "disabled":
+                if self._state.get("phase") in ("disabled", "postponed"):
                     self._state["phase"] = "waiting"
             else:
                 self._state["phase"] = "disabled"
@@ -436,11 +441,23 @@ class AutoRegisterScheduler:
                 return False
             raw = adapter.list_registration_sessions() or []
             sessions = raw.get("sessions", []) if isinstance(raw, dict) else raw
+            now = time.time()
             for s in sessions:
                 if not isinstance(s, dict):
                     continue
                 st = str(s.get("status") or "").strip().lower()
                 if st and st not in TERMINAL_SESSION_STATUSES and not s.get("finished"):
+                    # Check age: any session older than 600s (10 min) is definitely stale/abandoned,
+                    # not a currently-running live browser session!
+                    ua = float(s.get("updated_at") or s.get("created_at") or 0)
+                    if ua and (now - ua) > 600.0:
+                        sid = str(s.get("id") or "").strip()
+                        if sid:
+                            try:
+                                adapter.stop_registration_session(sid)
+                            except Exception:
+                                pass
+                        continue
                     return True
         except Exception:
             pass
@@ -826,6 +843,8 @@ class AutoRegisterScheduler:
                     # Postpone by 60 seconds if another manual registration is running
                     with self._lock:
                         self._state["next_run_at"] = now + 60
+                        self._state["phase"] = "postponed"
+                        self._persist_state()
                     return
                 run_n = batch_size
                 if max_pool > 0:

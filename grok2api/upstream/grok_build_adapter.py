@@ -511,12 +511,17 @@ _TERMINAL_STATUSES = frozenset(
         "imported",
         "success",
         "completed",
+        "done",
         "error",
         "failed",
         "expired",
+        "abandoned",
+        "timed_out",
+        "timeout",
         "protocol_error",
         "protocol_blocked",
         "cancelled",
+        "canceled",
         "stopped",
     }
 )
@@ -4434,12 +4439,18 @@ def _nonterminal_session_statuses() -> frozenset[str]:
             "starting",
             "started",
             "running",
+            "registering",
+            "creating_account",
+            "code_wait",
+            "email_submit",
+            "waiting_solver",
             "probing",
             "solving_turnstile",
             "waiting_email",
             "fetching_sso",
             "converting",
             "importing",
+            "pushing_sub2api",
             "stopping",
         }
     )
@@ -4532,7 +4543,7 @@ def reclaim_orphaned_registration_sessions(
         if want_batch and bid != want_batch:
             continue
         st = str(sess.get("status") or "").strip().lower()
-        if st in _TERMINAL_STATUSES or st not in nonterm:
+        if st in _TERMINAL_STATUSES or sess.get("finished"):
             continue
         age = now - float(sess.get("updated_at") or sess.get("created_at") or 0)
         live = _batch_liveness(bid) if bid else {

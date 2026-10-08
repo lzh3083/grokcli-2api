@@ -4,6 +4,27 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.5] - 2026-10-08
+
+> **版本分级说明**：本次更新重点修复定时与自动补齐注册（双模）调度器在特定异常遗留场景下导致前端倒计时陷入“一直剩余 60 秒刷新循环”的缺陷，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.4` → `v2.1.5`）**。
+
+### 🛡️ 稳定性与缺陷修复 (Bug Fixes & Reliability Improvements)
+
+- **根除调度器 60 秒顺延死循环（外部会话避让与孤儿会话清理）**：
+  - **根因分析**：
+    1. 历史批次曾遗留非终止态但已超时的孤儿会话（例如处于 `registering` 状态已超过数小时）；
+    2. 后台调度器 `_tick()` 检测到该残留会话存在时，判定有“外部手动注册正在执行”，因而每次都将 `next_run_at` 顺延 60 秒（`now + 60`），导致调度器始终处于 60 秒避让死循环；
+    3. `reclaim_orphaned_registration_sessions` 遗漏了部分非终止态（如 `registering`），且 `_TERMINAL_STATUSES` 缺少 `done` / `abandoned` 等状态，导致该孤儿会话无法被看门狗自动回收。
+  - **综合修复**：
+    1. 优化 `_has_external_active_sessions()`：增加存活时间检测（超过 10 分钟未更新的会话自动视为孤儿并请求停止），不再触发 60 秒顺延阻塞；
+    2. 扩充 `_nonterminal_session_statuses` 覆盖 `registering`、`creating_account`、`code_wait`、`email_submit`、`pushing_sub2api` 等全阶段状态，确保看门狗（Watchdog）能精准回收死锁的残留会话；
+    3. 扩充 `_TERMINAL_STATUSES` 包含 `done`、`abandoned`、`timed_out`、`timeout`、`canceled`；
+    4. 在 `update_config()` 保存配置时，若当前处于避让短周期，自动重新随机生成完整的长周期间隔（如 60~180 分钟），避免停留在旧的短周期。
+- **前端倒计时与本地时间漂移解耦（Client-Server Time Alignment）**：
+  - 前端 `renderAutoRegCountdown()` 支持优先基于后端返回的相对秒数 `next_run_in_sec` 与客户端请求耗时进行本地递减渲染，消除因客户端浏览器与服务器系统时间（NTP）微小漂移导致的倒计时突跳。
+
+---
+
 ## [v2.1.4] - 2026-10-08
 
 > **版本分级说明**：本次更新重点修复定时注册调度器在保存配置与状态读取时出现的 `Put "http://127.0.0.1:18070/internal/registration/v1/scheduler": net/http: timeout awaiting response headers` 超时错误，根治 Camoufox/Playwright 浏览器在异常关闭/崩溃时内部 dispatcher fiber 死亡引发的 100% CPU 忙轮询死循环与全局解释器锁（GIL）饥饿问题，同时对 Go 端侧车通信客户端和 FastAPI 异步处理进行全链路加固，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.3` → `v2.1.4`）**。
