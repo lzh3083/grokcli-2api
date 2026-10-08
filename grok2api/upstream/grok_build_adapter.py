@@ -4909,6 +4909,13 @@ def reclaim_orphaned_registration_batches(
             st == "error" and int(b.get("finished") or 0) < int(b.get("count") or 0)
         ):
             continue
+
+        has_local = False
+        with _lock:
+            has_local = bool(_active_batch_runners.get(bid))
+
+        batch_age = now_ts - float(b.get("updated_at") or b.get("created_at") or 0)
+
         if b.get("cancel_requested") and st in {"stopping", "cancelled", "stopped"}:
             if st == "stopping" and (batch_age >= 10.0 or not has_local):
                 with _lock:
@@ -4935,16 +4942,12 @@ def reclaim_orphaned_registration_batches(
         # Skip only if THIS process has a live runner. Redis locks from a dead
         # process (image restart) must not block auto-resume forever — force
         # clear them when no local runner owns the batch.
-        has_local = False
-        with _lock:
-            has_local = bool(_active_batch_runners.get(bid))
         if has_local:
             skipped.append({"batch_id": bid, "reason": "local_runner_alive", "status": st})
             continue
         # Multi-worker: another process may own the runner. Never force-clear a
         # live lock / recently-updated running batch — that causes thrash and
         # orphan reclaim of healthy in-flight sessions.
-        batch_age = now_ts - float(b.get("updated_at") or b.get("created_at") or 0)
         lock_token = None
         if _reg_redis():
             try:
@@ -4982,6 +4985,27 @@ def reclaim_orphaned_registration_batches(
         count = int(b.get("count") or 0)
         finished = int(b.get("finished") or 0)
         if count > 0 and finished >= count:
+            if st in ("running", "starting"):
+                ok_c = int(b.get("ok_count") or 0)
+                fail_c = int(b.get("fail_count") or 0)
+                final_st = "done" if (ok_c > 0 and fail_c == 0) else ("partial" if ok_c > 0 else "error")
+                with _lock:
+                    cur = _batches.get(bid) or dict(b)
+                    cur["status"] = final_st
+                    cur["runner_alive"] = False
+                    cur["inflight"] = 0
+                    _batches[bid] = cur
+                    _mirror_reg_batch(bid, dict(cur))
+                _record_register_task(
+                    task_id=bid,
+                    summary=f"finished {finished}/{count} (ok={ok_c} fail={fail_c})",
+                    status=final_st,
+                    ok=ok_c > 0,
+                    progress_done=finished,
+                    progress_total=count,
+                    finished=True,
+                    detail={"batch_id": bid, "ok_count": ok_c, "fail_count": fail_c},
+                )
             skipped.append({"batch_id": bid, "reason": "already_finished", "status": st})
             continue
         if not auto_resume:

@@ -487,9 +487,17 @@ class AutoRegisterScheduler:
                         with self._lock:
                             self._state["active_session_ids"] = sids
 
-                    # If the batch runner is still active or pending, it is NOT settled
-                    if bst not in TERMINAL_SESSION_STATUSES and not b.get("finished"):
-                        return False, 0, 0, []
+                    batch_total = int(b.get("count") or b.get("total") or 0)
+                    batch_done = int(b.get("finished") or b.get("done") or 0)
+                    runner_alive = bool(b.get("runner_alive"))
+                    cur_ok = int(b.get("ok_count") or b.get("imported") or 0)
+                    cur_fail = int(b.get("fail_count") or b.get("error") or 0)
+
+                    # If the batch runner is still active or not all requested jobs have finished, it is NOT settled
+                    if bst not in TERMINAL_SESSION_STATUSES and (
+                        runner_alive or (batch_total > 0 and batch_done < batch_total)
+                    ):
+                        return False, cur_ok, cur_fail, []
 
             if not sids:
                 return False, 0, 0, []
@@ -503,7 +511,7 @@ class AutoRegisterScheduler:
                     continue
                 st = str(s.get("status") or "").strip().lower()
                 if st not in TERMINAL_SESSION_STATUSES and not s.get("finished"):
-                    return False, 0, 0, []
+                    return False, imported_ok, failed_n, notes
                 # Session settled; check if it produced healthy imported account(s)
                 probe = s.get("probe") if isinstance(s.get("probe"), dict) else {}
                 discarded = probe.get("discarded") or []

@@ -1274,7 +1274,16 @@ class TurnstileAPIServer:
                             f"with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {proxy}"
                         )
 
-                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    try:
+                        await page.goto(url, wait_until='domcontentloaded', timeout=25000)
+                    except Exception as goto_err:
+                        if self.debug:
+                            logger.warning(
+                                f"Browser {index}: goto domcontentloaded timed out ({goto_err}), "
+                                f"retrying with wait_until='commit'"
+                            )
+                        await page.goto(url, wait_until='commit', timeout=25000)
+                        await asyncio.sleep(2.0)
                     await self._unblock_rendering(page)
                     try:
                         await self._dismiss_cookie_banners(page, index)

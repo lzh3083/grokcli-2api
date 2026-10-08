@@ -529,12 +529,14 @@ def cleanup_runtime_memory(log_callback=None, reason="定期清理"):
     if log_callback:
         log_callback(f"[*] {reason}: 关闭浏览器并清理内存")
     stop_browser()
+    # 回收退出的浏览器僵尸子进程 (<defunct>)
     try:
-        from cpa_xai.browser_confirm import shutdown_mint_browsers
-        shutdown_mint_browsers()
-    except Exception as exc:
-        if log_callback:
-            log_callback(f"[Debug] CPA 浏览器清理失败: {exc}")
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid <= 0:
+                break
+    except Exception:
+        pass
     collected = gc.collect()
     if log_callback:
         log_callback(f"[*] Python GC 已回收对象数: {collected}")

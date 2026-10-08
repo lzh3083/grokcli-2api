@@ -7,10 +7,17 @@ Flow token conversion and PostgreSQL persistence.
 from __future__ import annotations
 
 import os
+import random
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+_NOVPROXY_LOCK = threading.Lock()
+_NOVPROXY_BAD_UNTIL: dict[str, float] = {}
+_NOVPROXY_IDX = 0
+
 
 # Ensure browser_register package is in sys.path
 _PKG_DIR = Path(__file__).resolve().parent / "browser_register"
@@ -187,21 +194,58 @@ def run_browser_registration(
                     region = "JP"
 
             minutes = int(cfg.get("novproxy_minutes") or sess.get("novproxy_minutes") or 120)
-            _log_cb(f"[*] 正在从 NovProxy 提取实时动态住宅代理 ({region})...")
-            nodes = novproxy.fetch_nodes(
+            _log_cb(f"[*] 正在从 NovProxy 提取动态住宅代理池 ({region})...")
+            raw_nodes = novproxy.fetch_nodes(
                 api_base=api_base,
                 region=region,
-                num=1,
+                num=6,
                 minutes=minutes,
                 attempts=3,
                 timeout=15.0,
                 log=_log_cb,
             )
-            if nodes:
-                node = nodes[0]
-                active_proxy = node if "://" in node else f"socks5h://{node}"
+            if raw_nodes:
+                now_ts = time.time()
+                with _NOVPROXY_LOCK:
+                    # 清理过期黑名单
+                    dead_keys = [k for k, exp in _NOVPROXY_BAD_UNTIL.items() if exp <= now_ts]
+                    for k in dead_keys:
+                        _NOVPROXY_BAD_UNTIL.pop(k, None)
+                    # 优先挑选不在黑名单里的节点
+                    valid_nodes = [n for n in raw_nodes if _NOVPROXY_BAD_UNTIL.get(n, 0) <= now_ts]
+                    if not valid_nodes:
+                        valid_nodes = list(raw_nodes)
+
+                # 快速并发/顺序连通性测试 (探查 accounts.x.ai)
+                selected_node = None
+                for cand in valid_nodes:
+                    cand_proxy = cand if "://" in cand else f"socks5h://{cand}"
+                    try:
+                        t0 = time.monotonic()
+                        test_resp = requests.get(
+                            "https://accounts.x.ai/sign-up?redirect=grok-com",
+                            proxies={"http": cand_proxy, "https": cand_proxy},
+                            impersonate="chrome124",
+                            timeout=6,
+                            allow_redirects=False,
+                        )
+                        lat = int((time.monotonic() - t0) * 1000)
+                        if test_resp.status_code in (200, 301, 302, 307):
+                            selected_node = cand
+                            _log_cb(f"[+] 优选住宅节点可用: {cand} ({lat}ms)")
+                            break
+                        else:
+                            with _NOVPROXY_LOCK:
+                                _NOVPROXY_BAD_UNTIL[cand] = now_ts + 600
+                    except Exception:
+                        with _NOVPROXY_LOCK:
+                            _NOVPROXY_BAD_UNTIL[cand] = now_ts + 600
+
+                if not selected_node:
+                    selected_node = valid_nodes[0]
+
+                active_proxy = selected_node if "://" in selected_node else f"socks5h://{selected_node}"
                 _log_cb(f"[+] 成功分配 NovProxy 住宅节点 ({region}): {active_proxy}")
-                # 动态住宅代理使用原生出口，跳过昂贵的预检请求以节约流量并避免指纹突变
                 cfg["proxy_pool_preflight_enabled"] = False
         except Exception as n_exc:
             _log_cb(f"[!] NovProxy 动态提取失败: {n_exc}")
@@ -430,6 +474,13 @@ def run_browser_registration(
             except Exception as w_exc:
                 _log_cb(f"[*] 破冰会话跳过: {str(w_exc)[:90]}")
 
+    except Exception as reg_exc:
+        # 如果当前注册因 Turnstile 超时或网络异常失败，将当前代理加入临时黑名单，避免连环踩坑
+        if is_novproxy and active_proxy:
+            clean_host = active_proxy.split("://")[-1].strip()
+            with _NOVPROXY_LOCK:
+                _NOVPROXY_BAD_UNTIL[clean_host] = time.time() + 1200
+        raise
     finally:
         # Always reclaim browser process and memory after each registration
         try:
