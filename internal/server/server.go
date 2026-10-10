@@ -742,7 +742,8 @@ func serveChatCompletions(w http.ResponseWriter, r *http.Request, options Option
 			lastModel   = chatReq.Model
 			exclude     = map[string]struct{}{}
 		)
-		maxOpenAttempts := 4
+		maxOpenAttempts := defaultQualityMaxAttempts
+		qualityCfg := DefaultQualityRetryRuntime()
 		candPool := candidates
 		for attempt := 0; attempt < maxOpenAttempts; attempt++ {
 			if attempt > 0 && lastAccount != "" {
@@ -782,6 +783,30 @@ func serveChatCompletions(w http.ResponseWriter, r *http.Request, options Option
 			if options.runtimeConfig().SSEKeepalive > 0 {
 				req = r.WithContext(withAnthropicKeepalive(r.Context(), options.runtimeConfig().SSEKeepalive))
 			}
+			streamBody := opened.Body
+			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(chatReq.Raw) {
+				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolChat, qualityCfg)
+				if peekErr != nil || verdict == QualityWithhold {
+					_ = opened.Body.Close()
+					releaseServerPick(options, opened.AccountID)
+					cause := peekErr
+					if verdict == QualityWithhold {
+						cause = errQualityDegraded
+					}
+					if cause == nil {
+						cause = errQualityEmptyStream
+					}
+					reportChatPool(r, options, opened.AccountID, false, cause, http.StatusBadGateway, opened.Model)
+					lastAccount = opened.AccountID
+					lastModel = opened.Model
+					err = cause
+					if attempt+1 < maxOpenAttempts {
+						continue
+					}
+					break
+				}
+				streamBody = replayed
+			}
 			setProtocolObservationHeaders(w, protocolObservation{
 				Protocol: "openai_chat", AccountID: opened.AccountID, PreferAccount: opened.PreferAccount,
 				Failover: opened.Failover || attempt > 0, Fingerprint: opened.Fingerprint, Accounts: opened.Accounts, Prep: opened.Prep,
@@ -789,7 +814,7 @@ func serveChatCompletions(w http.ResponseWriter, r *http.Request, options Option
 			if pck != "" {
 				w.Header().Set("X-Grok2API-Prompt-Cache-Key", pck)
 			}
-			stats, err = streamChatCompletions(w, req, opened.Body, optionsFromRequest(req).Keepalive)
+			stats, err = streamChatCompletions(w, req, streamBody, optionsFromRequest(req).Keepalive)
 			_ = opened.Body.Close()
 			releaseServerPick(options, opened.AccountID)
 			// Wall-clock TTFT: open/pick + first real payload (stream clock starts after headers).
@@ -1802,7 +1827,8 @@ func serveMessages(w http.ResponseWriter, r *http.Request, options Options) {
 			lastModel    = model
 			exclude      = map[string]struct{}{}
 		)
-		maxOpenAttempts := 4
+		maxOpenAttempts := defaultQualityMaxAttempts
+		qualityCfg := DefaultQualityRetryRuntime()
 		candPool := candidates
 		for attempt := 0; attempt < maxOpenAttempts; attempt++ {
 			if attempt > 0 && lastAccount != "" {
@@ -1851,6 +1877,30 @@ func serveMessages(w http.ResponseWriter, r *http.Request, options Options) {
 			if policy.ToolGap > 0 {
 				req = req.WithContext(withOutboundToolGap(req.Context(), policy.ToolGap))
 			}
+			streamBody := opened.Body
+			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(body) {
+				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolAnthropic, qualityCfg)
+				if peekErr != nil || verdict == QualityWithhold {
+					_ = opened.Body.Close()
+					releaseServerPick(options, opened.AccountID)
+					cause := peekErr
+					if verdict == QualityWithhold {
+						cause = errQualityDegraded
+					}
+					if cause == nil {
+						cause = errQualityEmptyStream
+					}
+					reportChatPool(r, options, opened.AccountID, false, cause, http.StatusBadGateway, opened.Model)
+					lastAccount = opened.AccountID
+					lastModel = opened.Model
+					err = cause
+					if attempt+1 < maxOpenAttempts {
+						continue
+					}
+					break
+				}
+				streamBody = replayed
+			}
 			setAnthropicObservationHeaders(w, protocolObservation{Protocol: "anthropic",
 				AccountID: opened.AccountID, PreferAccount: opened.PreferAccount, Failover: opened.Failover || attempt > 0,
 				Fingerprint: opened.Fingerprint, Accounts: opened.Accounts, Prep: opened.Prep, Stream: true,
@@ -1860,7 +1910,7 @@ func serveMessages(w http.ResponseWriter, r *http.Request, options Options) {
 			}
 			// streamAnthropicMessages writes headers + message_start. Only one attempt
 			// can reach here per response; open-time empties are retried above.
-			usage, firstTokenMS, err = streamAnthropicMessages(w, req, opened.Body, messageID, opened.Model, len(allowedTools) > 0, allowedTools, maxTools)
+			usage, firstTokenMS, err = streamAnthropicMessages(w, req, streamBody, messageID, opened.Model, len(allowedTools) > 0, allowedTools, maxTools)
 			_ = opened.Body.Close()
 			releaseServerPick(options, opened.AccountID)
 			if firstTokenMS > 0 {
@@ -2337,8 +2387,10 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 			lastModel   = model
 			exclude     = map[string]struct{}{}
 		)
-		maxOpenAttempts := 4
+		maxOpenAttempts := defaultQualityMaxAttempts
+		qualityCfg := DefaultQualityRetryRuntime()
 		candPool := candidates
+		var streamBody io.ReadCloser
 		for attempt := 0; attempt < maxOpenAttempts; attempt++ {
 			if attempt > 0 && lastAccount != "" {
 				exclude[lastAccount] = struct{}{}
@@ -2370,6 +2422,36 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 				}
 				continue
 			}
+			if opened.Body == nil {
+				err = errQualityEmptyStream
+				reportChatPool(r, options, opened.AccountID, false, err, http.StatusBadGateway, lastModel)
+				lastAccount = opened.AccountID
+				continue
+			}
+			streamBody = opened.Body
+			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(body) {
+				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolResponses, qualityCfg)
+				if peekErr != nil || verdict == QualityWithhold {
+					_ = opened.Body.Close()
+					releaseServerPick(options, opened.AccountID)
+					cause := peekErr
+					if verdict == QualityWithhold {
+						cause = errQualityDegraded
+					}
+					if cause == nil {
+						cause = errQualityEmptyStream
+					}
+					reportChatPool(r, options, opened.AccountID, false, cause, http.StatusBadGateway, lastModel)
+					lastAccount = opened.AccountID
+					lastModel = model
+					err = cause
+					if attempt+1 < maxOpenAttempts {
+						continue
+					}
+					break
+				}
+				streamBody = replayed
+			}
 			break
 		}
 		if err != nil {
@@ -2377,7 +2459,7 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 			writeOpenAIProxyError(w, err)
 			return
 		}
-		if opened.Body == nil {
+		if streamBody == nil {
 			err = errors.New("Upstream returned HTTP 200 with empty model output (no content/tool_calls)")
 			recordResponsesUsage(r, options, apiKey, lastAccount, model, true, false, http.StatusBadGateway, started, nil, err, 0, raw)
 			writeOpenAIProxyError(w, err)
@@ -2386,7 +2468,7 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 		openElapsed := time.Since(started)
 		flusher, canFlush := w.(http.Flusher)
 		if !canFlush {
-			_ = opened.Body.Close()
+			_ = streamBody.Close()
 			releaseServerPick(options, opened.AccountID)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "streaming is not supported by this response writer"})
 			return
@@ -2415,7 +2497,7 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 		if canFlush {
 			flusher.Flush()
 		}
-		defer opened.Body.Close()
+		defer streamBody.Close()
 		defer releaseServerPick(options, opened.AccountID)
 		req := r
 		if options.runtimeConfig().SSEKeepalive > 0 {
@@ -2424,7 +2506,7 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 		if respPolicy.ToolGap > 0 {
 			req = req.WithContext(withOutboundToolGap(req.Context(), respPolicy.ToolGap))
 		}
-		usage, firstTokenMS, err := streamOpenAIResponsesContinue(w, req, opened.Body, early, effectiveResponsesKeepalive(optionsFromRequest(req).Keepalive, len(allowedResponsesToolNames(body)) > 0), respPolicy.MaxTools)
+		usage, firstTokenMS, err := streamOpenAIResponsesContinue(w, req, streamBody, early, effectiveResponsesKeepalive(optionsFromRequest(req).Keepalive, len(allowedResponsesToolNames(body)) > 0), respPolicy.MaxTools)
 		// firstTokenMS from Continue is ms from stream-read start → first delivered payload.
 		// Admin TTFT = open/pick duration + stream-local first payload (NOT full request latency).
 		if firstTokenMS > 0 {
@@ -3699,7 +3781,13 @@ func isRetryableUpstreamOpenErr(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if errors.Is(err, errQualityDegraded) || errors.Is(err, errQualityEmptyStream) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "quality_degraded") || strings.Contains(msg, "missing reasoning") || strings.Contains(msg, "缺少推理") {
+		return true
+	}
 	if strings.Contains(msg, "empty model output") ||
 		strings.Contains(msg, "no content/tool_calls") ||
 		strings.Contains(msg, "no client-visible content") {

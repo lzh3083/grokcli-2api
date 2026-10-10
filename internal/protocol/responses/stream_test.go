@@ -853,3 +853,26 @@ func TestEstimateOutputTokensNoFloorOnOpenOnly(t *testing.T) {
 		// Estimate must still be 0 until real chars or PayloadDelivered.
 	}
 }
+
+func TestOutputTextHasAnnotationsAndFailedHasModel(t *testing.T) {
+	s := NewLiveStreamer("resp_anno", "", nil)
+	s.Start()
+	textFrames := s.Text("hello world")
+	joinedText := strings.Join(textFrames, "")
+	if !strings.Contains(joinedText, `"annotations":[]`) {
+		t.Fatalf("content_part.added missing annotations: %s", joinedText)
+	}
+	completeFrames := s.Complete(&Usage{InputTokens: 1, OutputTokens: 2})
+	joinedComplete := strings.Join(completeFrames, "")
+	if !strings.Contains(joinedComplete, `"annotations":[]`) {
+		t.Fatalf("completed output_text missing annotations: %s", joinedComplete)
+	}
+
+	sFail := NewLiveStreamer("resp_fail", "", nil)
+	sFail.Start()
+	failedFrames := sFail.Fail("abort test", "server_error")
+	joinedFail := strings.Join(failedFrames, "")
+	if !strings.Contains(joinedFail, `"model":"grok-4.5"`) {
+		t.Fatalf("response.failed missing fallback model field: %s", joinedFail)
+	}
+}

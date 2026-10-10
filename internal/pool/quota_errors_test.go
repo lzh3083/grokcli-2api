@@ -249,3 +249,16 @@ func TestClassifyUnauthorizedShorterThanForbidden(t *testing.T) {
 		t.Fatalf("forbidden cool should be longer: 401=%v 403=%v", u.Until, f.Until)
 	}
 }
+
+func TestClassifyQualityDegradedEnters12HourCooldown(t *testing.T) {
+	d := ClassifyUpstreamFailure(502, "Upstream degraded: missing reasoning / thinking evidence (quality_degraded)", "grok-4.5")
+	if !d.ShouldCooldown {
+		t.Fatal("quality_degraded must trigger cooldown")
+	}
+	if d.Class != ClassQualityDegraded {
+		t.Fatalf("expected ClassQualityDegraded, got %s", d.Class)
+	}
+	if d.Until == nil || d.Until.Before(time.Now().Add(11*time.Hour)) {
+		t.Fatalf("expected ~12h cooldown, got %v", d.Until)
+	}
+}

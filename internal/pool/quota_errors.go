@@ -23,7 +23,8 @@ const (
 	ClassBilling       FailureClass = "billing_quota"
 	// ClassEmptyUpstream is a transient HTTP 200 with no content/tool payload.
 	// Matches Python empty_upstream short cool (8–20s) — must NOT use 5xx 3m cool.
-	ClassEmptyUpstream FailureClass = "empty_upstream"
+	ClassEmptyUpstream   FailureClass = "empty_upstream"
+	ClassQualityDegraded FailureClass = "quality_degraded"
 )
 
 // CooldownDecision is the structured action for pool/picker after a failure.
@@ -109,6 +110,26 @@ func ClassifyUpstreamFailure(status int, errText string, requestedModel ...strin
 	if !hasTokens {
 		// Some wrappers only keep tokens in the outer JSON string.
 		actual, limit, hasTokens = ParseTokenPair(errText)
+	}
+
+	// Quality degraded (missing thinking / fake encrypted stub / 降智) -> 12h account cooldown.
+	if strings.Contains(low, "quality_degraded") || strings.Contains(low, "missing reasoning") || strings.Contains(low, "缺少推理") {
+		coolHours := 12
+		if v := strings.TrimSpace(os.Getenv("GROK2API_QUALITY_COOLDOWN_HOURS")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 720 {
+				coolHours = n
+			}
+		}
+		until := time.Now().Add(time.Duration(coolHours) * time.Hour)
+		return CooldownDecision{
+			Class:          ClassQualityDegraded,
+			Code:           string(ClassQualityDegraded),
+			Model:          defaultModel(model),
+			Until:          &until,
+			ShouldCooldown: true,
+			BlockModel:     false,
+			Reason:         firstNonEmpty(text, "quality_degraded: missing reasoning/thinking evidence"),
+		}
 	}
 
 	// --- Free usage / quota exhausted (model or account) ---

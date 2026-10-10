@@ -72,6 +72,9 @@ func Failure(responseID, model, message, errorType string) []string {
 	if errorType == "" {
 		errorType = "server_error"
 	}
+	if model == "" {
+		model = "grok-4.5"
+	}
 	seq := &Sequence{}
 	initial := map[string]any{
 		"id": responseID, "object": "response", "created_at": 0,

@@ -552,6 +552,12 @@ func translateOrPassthroughSSE(reader io.Reader, writer io.Writer) error {
 		}
 		frames := bridge.handle(event)
 		for _, frame := range frames {
+			if strings.HasPrefix(frame, ":") {
+				if _, err := io.WriteString(writer, frame+"\n\n"); err != nil {
+					return err
+				}
+				continue
+			}
 			if _, err := io.WriteString(writer, "data: "+frame+"\n\n"); err != nil {
 				return err
 			}
@@ -702,6 +708,13 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 			return nil
 		}
 		itemType, _ := item["type"].(string)
+		if itemType == "reasoning" {
+			frames := []string{": grok2api-reasoning-start"}
+			if enc, _ := item["encrypted_content"].(string); strings.TrimSpace(enc) != "" {
+				frames = append(frames, fmt.Sprintf(": grok2api-encrypted-bytes:%d", len(strings.TrimSpace(enc))))
+			}
+			return frames
+		}
 		if itemType != "function_call" {
 			return nil
 		}
@@ -741,6 +754,15 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 		if item == nil {
 			return nil
 		}
+		if firstString(item, "type") == "reasoning" {
+			if enc, _ := item["encrypted_content"].(string); strings.TrimSpace(enc) != "" {
+				return []string{
+					": grok2api-reasoning-start",
+					fmt.Sprintf(": grok2api-encrypted-bytes:%d", len(strings.TrimSpace(enc))),
+				}
+			}
+			return nil
+		}
 		if firstString(item, "type") == "function_call" {
 			b.finish = "tool_calls"
 			// Ensure name/id are present even if only done event carried them.
@@ -774,8 +796,22 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 			if b.finish == "" {
 				b.finish = finishFromResponsesOutput(resp["output"])
 			}
+			var extraFrames []string
+			if outputItems, ok := resp["output"].([]any); ok {
+				for _, rawItem := range outputItems {
+					if it, ok := rawItem.(map[string]any); ok && firstString(it, "type") == "reasoning" {
+						if enc, _ := it["encrypted_content"].(string); strings.TrimSpace(enc) != "" {
+							extraFrames = append(extraFrames, fmt.Sprintf(": grok2api-encrypted-bytes:%d", len(strings.TrimSpace(enc))))
+						}
+					}
+				}
+			}
 			if !b.hasPayload {
-				return b.completedOutputFrames(resp["output"])
+				frames := b.completedOutputFrames(resp["output"])
+				return append(extraFrames, frames...)
+			}
+			if len(extraFrames) > 0 {
+				return extraFrames
 			}
 		}
 		return nil

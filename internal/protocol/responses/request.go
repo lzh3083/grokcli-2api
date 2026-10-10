@@ -388,7 +388,7 @@ func ReasoningEffort(raw map[string]any) string {
 func BuildObject(responseID, model, content, reasoning string, toolCalls []map[string]any, usage map[string]any, createdAt int64, previous string, metadata map[string]any) map[string]any {
 	output := []any{}
 	if content != "" || len(toolCalls) == 0 {
-		output = append(output, map[string]any{"id": "msg_" + responseID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": content}}})
+		output = append(output, map[string]any{"id": "msg_" + responseID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": content, "annotations": []any{}}}})
 	}
 	for i, call := range toolCalls {
 		fn, _ := call["function"].(map[string]any)
