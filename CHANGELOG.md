@@ -4,6 +4,41 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.6] - 2026-10-11
+
+> **版本分级说明**：本次更新是重大能力升级（Feature & Resilience Release），全面落地 Go 核心防降智与假思考拦截引擎（Peek & Hold）、加密思考密文下限验证（Ciphertext Floor）、12 小时降智账号冷却惩罚与全自动静默换号重试容灾，并补齐 Grok CLI / Codex 协议兼容字段（`annotations: []` 与 `response.failed.model`），按语义化版本规范（SemVer）定级为 **次版本/重要特性升级（Feature Release: `v2.1.5` → `v2.1.6`）**。
+
+### 🚀 核心新特性 (Core Features)
+
+- **Go 原生流式防降智与假思考探测引擎 (Peek & Hold Quality Retry)**：
+  - **首包扣留探测状态机**：在正式向客户端提交 HTTP 200 Headers 或发送首帧前，自动启用 `peekQualityStream` 探测上游返回证据（最长等待 30 秒或可见正文达到 8 个 tokens）；
+  - **真实推理证据识别**：只有流式明文推理增量（`reasoning_text.delta`、`reasoning_summary_text.delta`）或满足长度下限的加密密文（`encrypted_content`）才被认可为思考证据；
+  - **即刻无损回放**：一旦捕获有效证据，通过前缀缓冲拼接（`io.MultiReader`）实现 **0 额外延迟** 立即流向客户端，杜绝 TTFT 劣化；
+  - **空流毫秒级重试**：遇到上游返回的空 `response.completed` 或零输出 `[DONE]` 时，无需等待超时，几毫秒内立即触发换号重试。
+- **严格密文下限校验 (Ciphertext Floor Detection)**：
+  - 实现动态密文下限公式：$\text{EncryptedBytes} \ge \max(256\text{B},\; \text{ReasoningTokens} \times 4)$；
+  - 精准拦截仅包含空 reasoning 块、短伪密文 stub（如 `gAAAA-...`）但虚报 `reasoning_tokens` 的降智作弊行为。
+- **四大降智倾倒形态全面拦截**：
+  - **Burst Dump 拦截**：拦截 Hold 超时后吐出短问候（如“你好”）却伴随高额 reasoning 账单的倾倒；
+  - **Fake Encrypted Dump 拦截**：拦截伪加密思考在 `< 2s` 极短窗口内一次性倾倒全文；
+  - **Fast Reasoning Ratio Dump 拦截**：拦截 1ms 内瞬时吐出且推理比例高达 $\ge 80\%$ 的虚假响应；
+  - **Status-loop Cipher Drool 拦截**：拦截密文达标但 `reasoning_tokens = 0` 且持续狂吐正文的 128k 状态死循环。
+- **12 小时惩罚性冷却与多轮静默故障转移**：
+  - 遇到降智判决（`QualityWithhold`）时，自动释放当前连接与账号锁，并向存储层（PostgreSQL / Redis）上报 `quality_degraded`；
+  - 降智账号自动移出候选轮询池并施加 **12 小时冷却惩罚**（可通过 `GROK2API_QUALITY_COOLDOWN_HOURS` 配置）；
+  - 网关在后台自动剔除坏号并重选健康账号重新发起请求（最多重试 6 轮），客户端全程无感。
+
+### 🛡️ 协议兼容性与稳定性修复 (Compatibility & Bug Fixes)
+
+- **Grok CLI / TUI 反序列化崩溃修复**：
+  - 为所有 `output_text` 内容块统一补齐必选字段 `"annotations": []`，解决 Grok CLI Serde 报 `serialization error: missing field annotations` 导致的崩溃重试循环；
+- **错误终态模型字段补齐**：
+  - 确保 LiveStreamer 的 `response.failed` 事件始终包含非空 `"model"` 字段（回退为 `grok-4.5`），解决客户端因缺少模型字段解析失败的问题；
+- **双向 SSE 注释透传增强**：
+  - 在 `responses_bridge.go` 中将推理启动信号（`: grok2api-reasoning-start`）与密文长度（`: grok2api-encrypted-bytes:<len>`）作为标准 SSE 注释行透传，下游客户端与 SDK 能够原生透明忽略，100% 保证 JSON 解析兼容性。
+
+---
+
 ## [v2.1.5] - 2026-10-08
 
 > **版本分级说明**：本次更新重点修复定时与自动补齐注册（双模）调度器在特定异常遗留场景下导致前端倒计时陷入“一直剩余 60 秒刷新循环”的缺陷，按语义化版本规范（SemVer）定级为 **小版本 / 补丁版本升级（Patch Version: `v2.1.4` → `v2.1.5`）**。
