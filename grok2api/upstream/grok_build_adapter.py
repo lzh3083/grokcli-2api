@@ -169,8 +169,42 @@ def _note_reg_pressure(reason: str = "", *, pause_sec: float | None = None) -> N
         print(f"[registration] soft-pause {sec:.0f}s ({reason})")
 
 
-def _wait_reg_admission(*, check_cancel=None) -> None:
+def heal_registration_admission_semaphore() -> int:
+    """检查并自愈可能因异常挂起或孤儿回收泄漏的全局并发信号量。"""
+    global _global_reg_inflight
+    try:
+        with _lock:
+            active_workers = 0
+            for s in _sessions.values():
+                if isinstance(s, dict):
+                    st = str(s.get("status") or "").lower()
+                    if st not in _TERMINAL_STATUSES and not s.get("finished"):
+                        active_workers += 1
+
+            expected_free = max(0, _GLOBAL_REG_INFLIGHT_MAX - active_workers)
+            current_value = getattr(_global_reg_inflight, "_value", 0)
+            if current_value < expected_free:
+                needed = expected_free - current_value
+                for _ in range(needed):
+                    try:
+                        _global_reg_inflight.release()
+                    except Exception:
+                        pass
+                print(
+                    f"[registration] healed leaked admission semaphore: "
+                    f"was {current_value}, restored to {getattr(_global_reg_inflight, '_value', 0)} "
+                    f"(active_workers={active_workers}, max={_GLOBAL_REG_INFLIGHT_MAX})",
+                    flush=True,
+                )
+                return needed
+    except Exception:
+        pass
+    return 0
+
+
+def _wait_reg_admission(*, timeout: float = 60.0, check_cancel=None) -> None:
     """Block until global inflight slot is free and soft-pause window ends."""
+    deadline = time.time() + max(5.0, timeout)
     while True:
         if check_cancel is not None:
             try:
@@ -185,6 +219,12 @@ def _wait_reg_admission(*, check_cancel=None) -> None:
         # non-blocking try then short sleep to stay cancel-friendly
         if _global_reg_inflight.acquire(blocking=False):
             return
+        if time.time() >= deadline:
+            # 等待超时前尝试自愈信号量泄漏
+            healed = heal_registration_admission_semaphore()
+            if healed > 0 and _global_reg_inflight.acquire(blocking=False):
+                return
+            raise TimeoutError(f"等待全局注册并发许可超时 ({timeout:.0f}s)")
         time.sleep(0.15)
 
 
@@ -5156,6 +5196,8 @@ def _ensure_registration_watchdog() -> None:
         time.sleep(min(8.0, max(3.0, REG_WATCHDOG_SEC / 3.0)))
         while True:
             try:
+                # 巡检自愈因异常中断泄漏的全局并发信号量配额
+                heal_registration_admission_semaphore()
                 refreshed = _refresh_active_registration_ttls()
                 # Only resume batches that still have remaining work and no local runner.
                 try:

@@ -801,8 +801,22 @@ class AutoRegisterScheduler:
 
         with self._lock:
             if self._state.get("circuit_broken"):
-                self._state["phase"] = "circuit_broken"
-                return
+                last_fin = float(self._state.get("last_finish_at") or self._state.get("last_run_at") or 0.0)
+                # 熔断超过 60 分钟自动半开恢复重试，避免永久停滞
+                if (now - last_fin) >= 3600.0:
+                    print(
+                        f"[auto-reg-scheduler] circuit breaker cooled down after {int(now - last_fin)}s, half-open auto recovery triggered",
+                        flush=True,
+                    )
+                    self._state["circuit_broken"] = False
+                    self._state["circuit_broken_reason"] = None
+                    self._state["consecutive_failures"] = 0
+                    self._state["phase"] = "waiting"
+                    self._schedule_next_interval_locked(cfg)
+                    self._persist_state()
+                else:
+                    self._state["phase"] = "circuit_broken"
+                    return
 
         # Detect config changes to interval bounds
         sig = (
