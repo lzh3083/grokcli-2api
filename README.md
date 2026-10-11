@@ -149,26 +149,38 @@ xAI / Grok 模型在上游账号异常或受到安全风控时，常常出现**�
    cp .env.example .env
    ```
 
-2. **按需编辑 `.env` 文件**（请务必修改管理后台密码与数据库口令）：
+2. **按需编辑 `.env` 文件**（请务必设置管理后台强密码与数据库口令，切勿使用弱口令 `change-me`）：
    ```bash
-   # 管理后台登录密码（首次启动将作为初始密码种子）
+   # 管理后台登录密码（留空可通过本机首启 /admin 页面设置至少 8 位密码，或在此填入强密码）
    GROK2API_ADMIN_PASSWORD="YourSecureAdminPassword"
    
-   # 数据库访问凭据
-   DATABASE_URL="postgresql://grok2api:YourDBPassword@postgres:5432/grok2api"
+   # 强制 /v1/* 接口 API Key 鉴权（默认开启）
+   GROK2API_REQUIRE_API_KEY=1
+   
+   # PostgreSQL 数据库凭据（docker-compose.yml 会自动将这些变量同步至容器内 DATABASE_URL / GROK2API_DATABASE_URL，也可通过 GROK2API_COMPOSE_DATABASE_URL 显式覆盖）
+   POSTGRES_USER=grok2api
+   POSTGRES_PASSWORD="YourDBPassword"
+   POSTGRES_DB=grok2api
    ```
 
 3. **启动所有容器**：
    ```bash
    docker compose up -d --build
    ```
+   > **可选：热更新模式说明**
+   > 出于容器安全隔离考虑，默认 `docker-compose.yml` 不挂载宿主机 `/var/run/docker.sock`，默认 `GROK2API_HOT_UPDATE_MODE=request_file` 模式会将更新请求写入 `data/update.request`，配合宿主机 `scripts/g2a-update-watcher.sh` 执行更新；若需容器内直接调用 docker 自更新，则叠加 `-f docker-compose.hot-update.yml` 启动：
+   > ```bash
+   > docker compose -f docker-compose.yml -f docker-compose.hot-update.yml up -d
+   > ```
 
-4. **检查运行健康状况**：
+4. **检查运行健康状况与访问管理台**：
    ```bash
    curl -fsS http://127.0.0.1:3000/health
    # 响应: {"status":"healthy"}
    ```
-   随后即可在浏览器访问管理控制台：`http://你的服务器IP:3000/admin`。
+   > **端口绑定安全说明**：Docker Compose 默认仅绑定本机回环地址 `127.0.0.1:3000`（不直接向公网暴露端口）。
+   > - **本机访问**：浏览器直接打开 `http://127.0.0.1:3000/admin`。
+   > - **远程服务器访问**：推荐配合反向代理（Nginx / Caddy 配置 HTTPS）或通过 SSH 本地端口转发（`ssh -L 3000:127.0.0.1:3000 user@your-server`）访问 `http://127.0.0.1:3000/admin`；若需直接暴露端口，请确保已配置强管理员密码与 `GROK2API_REQUIRE_API_KEY=1` 后再按需修改端口绑定。
 
 ---
 
@@ -177,8 +189,9 @@ xAI / Grok 模型在上游账号异常或受到安全风控时，常常出现**�
 ```bash
 docker run -d \
   --name grokcli-2api \
-  -p 3000:3000 \
+  -p 127.0.0.1:3000:3000 \
   -e GROK2API_ADMIN_PASSWORD="YourSecureAdminPassword" \
+  -e GROK2API_REQUIRE_API_KEY=1 \
   -e DATABASE_URL="postgresql://grok2api:pwd@your-pg:5432/grok2api" \
   -e REDIS_URL="redis://your-redis:6379/0" \
   ghcr.io/lzh3083/grokcli-2api:latest
@@ -280,7 +293,9 @@ curl -N http://127.0.0.1:3000/v1/messages \
 
 ## 📜 版本历史
 
-- **v2.1.6 (Current)**
+- **v2.1.7 (Current)**
+  - **全栈安全加固与并发可靠性升级**：完成 94 项代码审查问题整改（首启与会话哈希加固、API Key 明文列自动清洗、SSRF/DNS Rebinding IP 绑定防护、流式探测协程泄漏修复、PG 事务锁与注册机多线程会话隔离）。
+- **v2.1.6**
   - **核心防降智与假思考拦截引擎落地**：实现流式 Peek & Hold（30s 探测窗口与 8 Token 可见正文下限）。
   - **密文下限验证 (Ciphertext Floor)**：严格校验 $\ge \max(256\text{B}, \text{Tokens} \times 4)$，彻底根除假推理与 stub 刷额度。
   - **12 小时降智惩罚与 6 轮自动容灾**：遇到降智流秒级自动换号重试，降智账号自动冷却 12h。

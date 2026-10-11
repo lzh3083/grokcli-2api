@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -120,6 +121,7 @@ func (c *Client) AcquireMaintenanceLock(ctx context.Context, owner string, timeo
 		return false, release, nil
 	}
 	stop := make(chan struct{})
+	var stopOnce sync.Once
 	go func() {
 		ticker := time.NewTicker(timeout / 3)
 		if timeout/3 < time.Second {
@@ -136,7 +138,9 @@ func (c *Client) AcquireMaintenanceLock(ctx context.Context, owner string, timeo
 		}
 	}()
 	release = func() {
-		close(stop)
+		stopOnce.Do(func() {
+			close(stop)
+		})
 		_, _ = c.ReleaseLock(context.Background(), lockKey, token)
 	}
 	return true, release, nil

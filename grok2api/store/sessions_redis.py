@@ -29,6 +29,16 @@ try:
 except (TypeError, ValueError):
     REG_TTL = 72 * 3600  # 72 hours
 ADMIN_TTL = 7 * 86400  # 7 days
+try:
+    MAX_SCAN_ITEMS = max(
+        100,
+        min(
+            10000,
+            int(os.environ.get("GROK2API_REDIS_SCAN_MAX_ITEMS", "2000") or 2000),
+        ),
+    )
+except (TypeError, ValueError):
+    MAX_SCAN_ITEMS = 2000
 
 
 def _device_key(session_id: str) -> str:
@@ -79,6 +89,8 @@ def device_list() -> list[tuple[str, dict[str, Any]]]:
         return []
     out: list[tuple[str, dict[str, Any]]] = []
     for k in c.scan_iter(match=key("device", "sess", "*"), count=50):
+        if len(out) >= MAX_SCAN_ITEMS:
+            break
         data = get_json(str(k))
         if isinstance(data, dict):
             sid = str(k).rsplit(":", 1)[-1]
@@ -149,6 +161,8 @@ def reg_sess_list() -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     for k in c.scan_iter(match=key("reg", "sess", "*"), count=50):
+        if len(out) >= MAX_SCAN_ITEMS:
+            break
         data = get_json(str(k))
         if isinstance(data, dict):
             out.append(data)
@@ -185,6 +199,8 @@ def reg_batch_list() -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     for k in c.scan_iter(match=key("reg", "batch", "*"), count=50):
+        if len(out) >= MAX_SCAN_ITEMS:
+            break
         data = get_json(str(k))
         if isinstance(data, dict):
             out.append(data)

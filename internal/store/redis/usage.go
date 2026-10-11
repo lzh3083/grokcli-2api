@@ -7,7 +7,12 @@ import (
 	"time"
 )
 
-const usageDayTTLSeconds = 40 * 24 * 3600
+const (
+	usageDayTTLSeconds  = 40 * 24 * 3600
+	usageLifeTTLSeconds = 180 * 86400
+)
+
+var usageDayZone = time.FixedZone("CST", 8*3600)
 
 var usageFields = []string{
 	"requests",
@@ -61,11 +66,9 @@ func (c *Client) usageLifeKey(dim, dimID string) string {
 
 func usageDayString(ts time.Time) string {
 	if ts.IsZero() {
-		ts = time.Now().UTC()
-	} else {
-		ts = ts.UTC()
+		ts = time.Now()
 	}
-	return ts.Format("20060102")
+	return ts.In(usageDayZone).Format("20060102")
 }
 
 // RecordUsage bumps Python-compatible hot buckets:
@@ -120,7 +123,7 @@ func (c *Client) RecordUsage(ctx context.Context, rec UsageDeltas) bool {
 			anyOK = true
 		}
 		if dim[0] == "global" || dim[0] == "key" || dim[0] == "account" {
-			_ = c.incrUsageHash(ctx, c.usageLifeKey(dim[0], dim[1]), deltas, 0)
+			_ = c.incrUsageHash(ctx, c.usageLifeKey(dim[0], dim[1]), deltas, usageLifeTTLSeconds)
 		}
 	}
 	return anyOK
@@ -166,7 +169,7 @@ func (c *Client) GetUsageLifetime(ctx context.Context, dim, dimID string) map[st
 
 // LightSnapshot matches Python usage_redis.light_snapshot for status cards.
 func (c *Client) LightSnapshot(ctx context.Context) map[string]any {
-	today := c.GetUsageDay(ctx, "global", "", time.Now().UTC())
+	today := c.GetUsageDay(ctx, "global", "", time.Now().In(usageDayZone))
 	life := c.GetUsageLifetime(ctx, "global", "")
 	return map[string]any{
 		"today_requests":          today["requests"],

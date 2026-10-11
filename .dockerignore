@@ -9,6 +9,8 @@ data
 *.log
 .env
 .env.*
+!.env.example
+bin/
 register
 vendors
 **/.pytest_cache

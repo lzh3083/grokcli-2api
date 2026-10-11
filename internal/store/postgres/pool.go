@@ -42,7 +42,7 @@ func (c *Connector) GetPoolCandidate(ctx context.Context, accountID string) (*po
 	row := c.Pool.QueryRow(ctx, `
 		SELECT a.id, a.payload, a.email, a.user_id, a.team_id, a.expires_at,
 		       COALESCE(ap.enabled, true), COALESCE(ap.disabled_for_quota, false),
-		       ap.cooldown_until, COALESCE(ap.blocked_models, '{}'::jsonb),
+		       COALESCE(ap.pool_status, ''), ap.cooldown_until, COALESCE(ap.blocked_models, '{}'::jsonb),
 		       COALESCE(ap.request_count, 0), COALESCE(ap.weight, 1)
 		FROM accounts a
 		LEFT JOIN account_pool ap ON ap.account_id = a.id
@@ -52,7 +52,7 @@ func (c *Connector) GetPoolCandidate(ctx context.Context, accountID string) (*po
 	var payloadBytes, blockedBytes []byte
 	var email, userID, teamID *string
 	var expiresAt, cooldownUntil *time.Time
-	if err := row.Scan(&candidate.ID, &payloadBytes, &email, &userID, &teamID, &expiresAt, &candidate.Enabled, &candidate.DisabledForQuota, &cooldownUntil, &blockedBytes, &candidate.RequestCount, &candidate.Weight); err != nil {
+	if err := row.Scan(&candidate.ID, &payloadBytes, &email, &userID, &teamID, &expiresAt, &candidate.Enabled, &candidate.DisabledForQuota, &candidate.PoolStatus, &cooldownUntil, &blockedBytes, &candidate.RequestCount, &candidate.Weight); err != nil {
 		return nil, err
 	}
 	payload := decodeMap(payloadBytes)
@@ -94,7 +94,7 @@ func (c *Connector) ListPoolCandidates(ctx context.Context) ([]pool.Candidate, e
 		rows, err := c.Pool.Query(ctx, `
 			SELECT a.id, a.payload, a.email, a.user_id, a.team_id, a.expires_at,
 			       COALESCE(ap.enabled, true), COALESCE(ap.disabled_for_quota, false),
-			       ap.cooldown_until, COALESCE(ap.blocked_models, '{}'::jsonb),
+			       COALESCE(ap.pool_status, ''), ap.cooldown_until, COALESCE(ap.blocked_models, '{}'::jsonb),
 			       COALESCE(ap.request_count, 0), COALESCE(ap.weight, 1)
 			FROM accounts a
 			LEFT JOIN account_pool ap ON ap.account_id = a.id
@@ -119,7 +119,7 @@ func (c *Connector) ListPoolCandidates(ctx context.Context) ([]pool.Candidate, e
 			var payloadBytes, blockedBytes []byte
 			var email, userID, teamID *string
 			var expiresAt, cooldownUntil *time.Time
-			if err := rows.Scan(&candidate.ID, &payloadBytes, &email, &userID, &teamID, &expiresAt, &candidate.Enabled, &candidate.DisabledForQuota, &cooldownUntil, &blockedBytes, &candidate.RequestCount, &candidate.Weight); err != nil {
+			if err := rows.Scan(&candidate.ID, &payloadBytes, &email, &userID, &teamID, &expiresAt, &candidate.Enabled, &candidate.DisabledForQuota, &candidate.PoolStatus, &cooldownUntil, &blockedBytes, &candidate.RequestCount, &candidate.Weight); err != nil {
 				return nil, err
 			}
 			payload := decodeMap(payloadBytes)
@@ -566,28 +566,13 @@ func (c *Connector) KickFromPool(ctx context.Context, accountID, reason string, 
 		// Track stack depth for UI, but DO NOT multiply duration by count.
 		// Old formula until = now + baseSec*count turned 2h free-usage cools into multi-day
 		// bans after a few probe/request failures (count 30+ → days of cooldown).
-		var prevCount int64
-		var prevUntil *time.Time
-		_ = c.Pool.QueryRow(ctx,
-			`SELECT COALESCE(cooldown_count, 0), cooldown_until FROM account_pool WHERE account_id = $1`,
-			accountID,
-		).Scan(&prevCount, &prevUntil)
-		newCount := prevCount + 1
-		if newCount < 1 {
-			newCount = 1
-		}
 		baseSec := maxFloat(*cooldownSec, 60)
 		// Hard cap single cool window (free-usage rolling window fraction already ≤6h).
 		if baseSec > 6*3600 {
 			baseSec = 6 * 3600
 		}
 		now := time.Now()
-		base := now
-		// If already cooling, extend from the later of now / previous until (no stack multiply).
-		if prevUntil != nil && prevUntil.After(now) {
-			base = *prevUntil
-		}
-		until := base.Add(time.Duration(baseSec) * time.Second)
+		until := now.Add(time.Duration(baseSec) * time.Second)
 		// Absolute remaining cap from now so stacks cannot run away.
 		maxUntil := now.Add(6 * time.Hour)
 		if until.After(maxUntil) {
@@ -606,20 +591,21 @@ func (c *Connector) KickFromPool(ctx context.Context, accountID, reason string, 
 			strings.Contains(lowReason, "tokens") && (strings.Contains(lowReason, "actual") || strings.Contains(lowReason, "limit"))
 		_, err := c.Pool.Exec(ctx, `
 			INSERT INTO account_pool (account_id, enabled, pool_status, cooldown_until, cooldown_reason, cooldown_count, last_error, blocked_models, extra, updated_at)
-			VALUES ($1, true, 'cooldown', $2, $3, $4::int, $3, '{}'::jsonb, jsonb_build_object('cooldown_count', $4::int), now())
+			VALUES ($1, true, 'cooldown', $2, $3, 1, $3, '{}'::jsonb, jsonb_build_object('cooldown_count', 1), now())
 			ON CONFLICT (account_id) DO UPDATE SET
 				pool_status = 'cooldown',
-				cooldown_until = EXCLUDED.cooldown_until,
+				cooldown_until = GREATEST(COALESCE(account_pool.cooldown_until, to_timestamp(0)), EXCLUDED.cooldown_until),
 				cooldown_reason = EXCLUDED.cooldown_reason,
-				cooldown_count = EXCLUDED.cooldown_count,
+				cooldown_count = COALESCE(account_pool.cooldown_count, 0) + 1,
 				last_error = EXCLUDED.last_error,
-				blocked_models = CASE WHEN $5::bool THEN '{}'::jsonb ELSE COALESCE(account_pool.blocked_models, '{}'::jsonb) END,
-				extra = COALESCE(account_pool.extra, '{}'::jsonb) || jsonb_build_object('cooldown_count', EXCLUDED.cooldown_count),
+				blocked_models = CASE WHEN $4::bool THEN '{}'::jsonb ELSE COALESCE(account_pool.blocked_models, '{}'::jsonb) END,
+				extra = COALESCE(account_pool.extra, '{}'::jsonb) || jsonb_build_object('cooldown_count', COALESCE(account_pool.cooldown_count, 0) + 1),
 				updated_at = now()
-		`, accountID, until, reason, int(newCount), clearBlocks)
+		`, accountID, until, reason, clearBlocks)
 		if err != nil {
 			return nil, err
 		}
+		c.InvalidatePoolSummaryCache()
 		return c.GetAccountPoolView(ctx, accountID)
 	}
 	return c.SetAccountEnabled(ctx, accountID, false)

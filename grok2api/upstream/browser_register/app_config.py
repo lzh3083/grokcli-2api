@@ -418,8 +418,11 @@ def validate_config(raw):
 
 
 def _replace_config(value):
-    config.clear()
-    config.update(value)
+    new_cfg = dict(value)
+    config.update(new_cfg)
+    for k in list(config.keys()):
+        if k not in new_cfg:
+            config.pop(k, None)
     return config
 
 

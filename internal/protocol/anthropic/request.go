@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hm2899/grokcli-2api/internal/protocol/reasoning"
 )
@@ -202,9 +203,7 @@ func ExtractPromptCacheKey(raw map[string]any) string {
 	case string:
 		text := strings.TrimSpace(system)
 		if text != "" {
-			if len(text) > 160 {
-				text = text[:160]
-			}
+			text = truncateUTF8(text, 160)
 			pieces = append(pieces, "sys:"+text)
 		}
 	case []any:
@@ -222,17 +221,13 @@ func ExtractPromptCacheKey(raw map[string]any) string {
 		}
 		text := strings.TrimSpace(b.String())
 		if text != "" {
-			if len(text) > 160 {
-				text = text[:160]
-			}
+			text = truncateUTF8(text, 160)
 			pieces = append(pieces, "sys:"+text)
 		}
 	case map[string]any:
 		text := strings.TrimSpace(stringValue(system["text"]))
 		if text != "" {
-			if len(text) > 160 {
-				text = text[:160]
-			}
+			text = truncateUTF8(text, 160)
 			pieces = append(pieces, "sys:"+text)
 		}
 	}
@@ -251,9 +246,7 @@ func ExtractPromptCacheKey(raw map[string]any) string {
 			if text == "" {
 				continue
 			}
-			if len(text) > 160 {
-				text = text[:160]
-			}
+			text = truncateUTF8(text, 160)
 			pieces = append(pieces, "u0:"+text)
 			break
 		}
@@ -263,6 +256,17 @@ func ExtractPromptCacheKey(raw map[string]any) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(pieces, "|")))
 	return "sess:" + hex.EncodeToString(sum[:16])
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	s = s[:maxBytes]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // ExtractClaudeCodeSessionID pulls session_<id> out of Claude Code user_id strings.
@@ -288,10 +292,7 @@ func truncateKey(value string) string {
 	if value == "" {
 		return ""
 	}
-	if len(value) > 240 {
-		return value[:240]
-	}
-	return value
+	return truncateUTF8(value, 240)
 }
 
 func cacheControlFingerprint(block map[string]any) string {
@@ -312,9 +313,7 @@ func cacheControlFingerprint(block map[string]any) string {
 		if text == "" {
 			return ""
 		}
-		if len(text) > 40 {
-			text = text[:40]
-		}
+		text = truncateUTF8(text, 40)
 		return "cc:" + text
 	case map[string]any:
 		ctype := strings.TrimSpace(stringValue(value["type"]))
@@ -322,9 +321,7 @@ func cacheControlFingerprint(block map[string]any) string {
 			ctype = "ephemeral"
 		}
 		if ttl := stringValue(value["ttl"]); ttl != "" {
-			if len(ttl) > 24 {
-				ttl = ttl[:24]
-			}
+			ttl = truncateUTF8(ttl, 24)
 			return "cc:" + ctype + ":" + ttl
 		}
 		return "cc:" + ctype

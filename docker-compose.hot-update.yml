@@ -1,0 +1,22 @@
+# Optional Docker Compose extension for in-container self-update.
+#
+# Security Note (C-2):
+# Mounting /var/run/docker.sock and ./:/compose grants the application container
+# privilege equivalent to host root over the Docker daemon and project directory.
+# By default, docker-compose.yml omits these mounts and uses `GROK2API_HOT_UPDATE_MODE=watcher`.
+#
+# If you explicitly want one-click in-container hot updates from the Admin UI,
+# start the stack with:
+#   docker compose -f docker-compose.yml -f docker-compose.hot-update.yml up -d
+#
+services:
+  grokcli-2api:
+    environment:
+      GROK2API_HOT_UPDATE_MODE: "docker"
+      GROK2API_COMPOSE_DIR: "${GROK2API_COMPOSE_DIR:-/compose}"
+      GROK2API_DOCKER_SERVICE: "${GROK2API_DOCKER_SERVICE:-grokcli-2api}"
+    volumes:
+      # In-container hot-update: docker CLI talks to host docker daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Compose project for force-recreate (override file written under /compose).
+      - ./:/compose

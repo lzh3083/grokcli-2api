@@ -64,7 +64,9 @@ func CheckStartup(ctx context.Context, cfg config.Config, migrations fs.FS) erro
 	if cfg.RedisURL == "" {
 		return errors.New("Redis URL is required")
 	}
-	if err := redis.New(cfg.RedisURL, cfg.RedisPrefix).Ping(ctx); err != nil {
+	rc := redis.New(cfg.RedisURL, cfg.RedisPrefix)
+	defer rc.Close()
+	if err := rc.Ping(ctx); err != nil {
 		return fmt.Errorf("connect Redis: %w", err)
 	}
 

@@ -18,7 +18,7 @@ type AffinityEntry struct {
 }
 
 func (c *Client) GetAffinity(ctx context.Context, fingerprint string, ttl time.Duration) (*AffinityEntry, error) {
-	fingerprint = strings.TrimSpace(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	if fingerprint == "" {
 		return nil, nil
 	}
@@ -42,8 +42,10 @@ func (c *Client) GetAffinity(ctx context.Context, fingerprint string, ttl time.D
 }
 
 func (c *Client) BindAffinity(ctx context.Context, fingerprint, accountID string, ttl time.Duration, sessionFP, promptCacheKey string) error {
-	fingerprint = strings.TrimSpace(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	accountID = strings.TrimSpace(accountID)
+	sessionFP = normalizeAffinityCacheKey(sessionFP)
+	promptCacheKey = normalizeAffinityCacheKey(promptCacheKey)
 	if fingerprint == "" || accountID == "" {
 		return nil
 	}
@@ -56,14 +58,14 @@ func (c *Client) BindAffinity(ctx context.Context, fingerprint, accountID string
 		entry.BoundAt = prev.BoundAt
 		entry.Hits = prev.Hits + 1
 		if sessionFP == "" {
-			sessionFP = prev.SessionFP
+			sessionFP = normalizeAffinityCacheKey(prev.SessionFP)
 		}
 		if promptCacheKey == "" {
-			promptCacheKey = prev.PromptCacheKey
+			promptCacheKey = normalizeAffinityCacheKey(prev.PromptCacheKey)
 		}
 	}
-	entry.SessionFP = strings.TrimSpace(sessionFP)
-	entry.PromptCacheKey = strings.TrimSpace(promptCacheKey)
+	entry.SessionFP = sessionFP
+	entry.PromptCacheKey = promptCacheKey
 	if err := c.setAffinity(ctx, fingerprint, entry, ttl); err != nil {
 		return err
 	}
@@ -72,7 +74,7 @@ func (c *Client) BindAffinity(ctx context.Context, fingerprint, accountID string
 }
 
 func (c *Client) ClearAffinity(ctx context.Context, fingerprint string) error {
-	fingerprint = strings.TrimSpace(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	if fingerprint == "" {
 		return nil
 	}
@@ -113,8 +115,9 @@ func stringInt(value int) string {
 // BindResponseAccount maps a Responses API response_id to account + prompt_cache_key
 // so Codex multi-turn requests that only send previous_response_id can stick.
 func (c *Client) BindResponseAccount(ctx context.Context, responseID, accountID, promptCacheKey string, ttl time.Duration) error {
-	responseID = strings.TrimSpace(responseID)
+	responseID = normalizeAffinityCacheKey(responseID)
 	accountID = strings.TrimSpace(accountID)
+	promptCacheKey = normalizeAffinityCacheKey(promptCacheKey)
 	if responseID == "" || accountID == "" {
 		return nil
 	}
@@ -126,7 +129,7 @@ func (c *Client) BindResponseAccount(ctx context.Context, responseID, accountID,
 		BoundAt:        unixFloat(time.Now()),
 		LastSeen:       unixFloat(time.Now()),
 		Hits:           1,
-		PromptCacheKey: strings.TrimSpace(promptCacheKey),
+		PromptCacheKey: promptCacheKey,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -136,7 +139,7 @@ func (c *Client) BindResponseAccount(ctx context.Context, responseID, accountID,
 }
 
 func (c *Client) GetResponseAccount(ctx context.Context, responseID string) (*AffinityEntry, error) {
-	responseID = strings.TrimSpace(responseID)
+	responseID = normalizeAffinityCacheKey(responseID)
 	if responseID == "" {
 		return nil, nil
 	}

@@ -2,6 +2,8 @@ package redis
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sync"
 	"time"
 )
@@ -53,11 +55,24 @@ type responsePendingWrite struct {
 
 // Long enough to cover multi-turn Codex sessions in-process without thrashing Redis.
 // Still short enough that kick/disable eventually re-resolves via Redis/PG eligibility.
-const affinityLocalTTL = 30 * time.Minute
-const responseLocalTTL = 30 * time.Minute
+const (
+	affinityLocalTTL       = 30 * time.Minute
+	responseLocalTTL       = 30 * time.Minute
+	maxAffinityCacheSize   = 8192
+	maxAffinityCacheKeyLen = 256
+)
+
+func normalizeAffinityCacheKey(key string) string {
+	key = stringsTrim(key)
+	if len(key) > maxAffinityCacheKeyLen {
+		sum := sha256.Sum256([]byte(key))
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}
+	return key
+}
 
 func affinityCacheGet(fingerprint string) (string, bool) {
-	fingerprint = stringsTrim(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	if fingerprint == "" {
 		return "", false
 	}
@@ -75,26 +90,35 @@ func affinityCacheGet(fingerprint string) (string, bool) {
 }
 
 func affinityCacheSet(fingerprint, accountID string) {
-	fingerprint = stringsTrim(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	accountID = stringsTrim(accountID)
 	if fingerprint == "" || accountID == "" {
 		return
 	}
 	affinityCacheMu.Lock()
 	affinityCache[fingerprint] = affinityCacheEntry{accountID: accountID, expires: time.Now().Add(affinityLocalTTL)}
-	if len(affinityCache) > 8192 {
+	if len(affinityCache) > maxAffinityCacheSize {
 		now := time.Now()
 		for k, v := range affinityCache {
 			if now.After(v.expires) {
 				delete(affinityCache, k)
 			}
 		}
+		for k := range affinityCache {
+			if len(affinityCache) <= maxAffinityCacheSize {
+				break
+			}
+			if k == fingerprint {
+				continue
+			}
+			delete(affinityCache, k)
+		}
 	}
 	affinityCacheMu.Unlock()
 }
 
 func responseCacheGet(responseID string) (accountID, promptCacheKey string, ok bool) {
-	responseID = stringsTrim(responseID)
+	responseID = normalizeAffinityCacheKey(responseID)
 	if responseID == "" {
 		return "", "", false
 	}
@@ -112,23 +136,33 @@ func responseCacheGet(responseID string) (accountID, promptCacheKey string, ok b
 }
 
 func responseCacheSet(responseID, accountID, promptCacheKey string) {
-	responseID = stringsTrim(responseID)
+	responseID = normalizeAffinityCacheKey(responseID)
 	accountID = stringsTrim(accountID)
+	promptCacheKey = normalizeAffinityCacheKey(promptCacheKey)
 	if responseID == "" || accountID == "" {
 		return
 	}
 	affinityCacheMu.Lock()
 	responseCache[responseID] = responseCacheEntry{
 		accountID:      accountID,
-		promptCacheKey: stringsTrim(promptCacheKey),
+		promptCacheKey: promptCacheKey,
 		expires:        time.Now().Add(responseLocalTTL),
 	}
-	if len(responseCache) > 8192 {
+	if len(responseCache) > maxAffinityCacheSize {
 		now := time.Now()
 		for k, v := range responseCache {
 			if now.After(v.expires) {
 				delete(responseCache, k)
 			}
+		}
+		for k := range responseCache {
+			if len(responseCache) <= maxAffinityCacheSize {
+				break
+			}
+			if k == responseID {
+				continue
+			}
+			delete(responseCache, k)
 		}
 	}
 	affinityCacheMu.Unlock()
@@ -158,8 +192,10 @@ func affinityScheduleWrite(
 	sessionFP, promptCacheKey string,
 	writer func(ctx context.Context, fingerprint, accountID string, ttl time.Duration, sessionFP, promptCacheKey string) error,
 ) {
-	fingerprint = stringsTrim(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	accountID = stringsTrim(accountID)
+	sessionFP = normalizeAffinityCacheKey(sessionFP)
+	promptCacheKey = normalizeAffinityCacheKey(promptCacheKey)
 	if fingerprint == "" || accountID == "" || writer == nil {
 		return
 	}
@@ -169,8 +205,19 @@ func affinityScheduleWrite(
 	affinityPendingMu.Lock()
 	affinityPending[fingerprint] = affinityPendingWrite{
 		accountID: accountID, ttl: ttl,
-		sessionFP: stringsTrim(sessionFP), promptCacheKey: stringsTrim(promptCacheKey),
+		sessionFP: sessionFP, promptCacheKey: promptCacheKey,
 		writer: writer,
+	}
+	if len(affinityPending) > maxAffinityCacheSize {
+		for k := range affinityPending {
+			if len(affinityPending) <= maxAffinityCacheSize {
+				break
+			}
+			if k == fingerprint {
+				continue
+			}
+			delete(affinityPending, k)
+		}
 	}
 	if affinityFlushing[fingerprint] {
 		affinityPendingMu.Unlock()
@@ -184,7 +231,7 @@ func affinityScheduleWrite(
 			affinityPendingMu.Lock()
 			job, ok := affinityPending[fp]
 			if !ok {
-				affinityFlushing[fp] = false
+				delete(affinityFlushing, fp)
 				affinityPendingMu.Unlock()
 				return
 			}
@@ -203,8 +250,9 @@ func responseScheduleWrite(
 	ttl time.Duration,
 	writer func(ctx context.Context, responseID, accountID, promptCacheKey string, ttl time.Duration) error,
 ) {
-	responseID = stringsTrim(responseID)
+	responseID = normalizeAffinityCacheKey(responseID)
 	accountID = stringsTrim(accountID)
+	promptCacheKey = normalizeAffinityCacheKey(promptCacheKey)
 	if responseID == "" || accountID == "" || writer == nil {
 		return
 	}
@@ -213,8 +261,19 @@ func responseScheduleWrite(
 	}
 	responsePendingMu.Lock()
 	responsePending[responseID] = responsePendingWrite{
-		accountID: accountID, promptCacheKey: stringsTrim(promptCacheKey),
+		accountID: accountID, promptCacheKey: promptCacheKey,
 		ttl: ttl, writer: writer,
+	}
+	if len(responsePending) > maxAffinityCacheSize {
+		for k := range responsePending {
+			if len(responsePending) <= maxAffinityCacheSize {
+				break
+			}
+			if k == responseID {
+				continue
+			}
+			delete(responsePending, k)
+		}
 	}
 	if responseFlushing[responseID] {
 		responsePendingMu.Unlock()
@@ -228,7 +287,7 @@ func responseScheduleWrite(
 			responsePendingMu.Lock()
 			job, ok := responsePending[rid]
 			if !ok {
-				responseFlushing[rid] = false
+				delete(responseFlushing, rid)
 				responsePendingMu.Unlock()
 				return
 			}
@@ -242,17 +301,62 @@ func responseScheduleWrite(
 	}(responseID)
 }
 
-func affinityCacheDelete(fingerprint string) {
-	fingerprint = stringsTrim(fingerprint)
-	if fingerprint == "" {
+func affinityDeletePending(fingerprint string) {
+	rawFP := stringsTrim(fingerprint)
+	if rawFP == "" {
 		return
 	}
+	normKey := normalizeAffinityCacheKey(rawFP)
+	affinityPendingMu.Lock()
+	delete(affinityPending, normKey)
+	if normKey != rawFP {
+		delete(affinityPending, rawFP)
+	}
+	affinityPendingMu.Unlock()
+}
+
+func responseDeletePending(responseID string) {
+	rawRID := stringsTrim(responseID)
+	if rawRID == "" {
+		return
+	}
+	normKey := normalizeAffinityCacheKey(rawRID)
+	responsePendingMu.Lock()
+	delete(responsePending, normKey)
+	if normKey != rawRID {
+		delete(responsePending, rawRID)
+	}
+	responsePendingMu.Unlock()
+}
+
+func affinityCacheDelete(fingerprint string) {
+	rawFP := stringsTrim(fingerprint)
+	if rawFP == "" {
+		return
+	}
+	normKey := normalizeAffinityCacheKey(rawFP)
 	affinityCacheMu.Lock()
-	delete(affinityCache, fingerprint)
+	delete(affinityCache, normKey)
+	if normKey != rawFP {
+		delete(affinityCache, rawFP)
+	}
 	affinityCacheMu.Unlock()
 	// Drop any coalesced pending Redis write so a stale rebind cannot resurrect
 	// a just-cleared pin after sticky failover.
-	affinityPendingMu.Lock()
-	delete(affinityPending, fingerprint)
-	affinityPendingMu.Unlock()
+	affinityDeletePending(rawFP)
+}
+
+func responseCacheDelete(responseID string) {
+	rawRID := stringsTrim(responseID)
+	if rawRID == "" {
+		return
+	}
+	normKey := normalizeAffinityCacheKey(rawRID)
+	affinityCacheMu.Lock()
+	delete(responseCache, normKey)
+	if normKey != rawRID {
+		delete(responseCache, rawRID)
+	}
+	affinityCacheMu.Unlock()
+	responseDeletePending(rawRID)
 }

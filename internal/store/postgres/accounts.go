@@ -366,34 +366,8 @@ func buildAccountListWhere(query, status string, hasSSO *bool) (string, []any) {
 		// they must NOT put recovered accounts back into the cooldown bucket.
 		cooldownExpr := `(COALESCE(ap.pool_status, '') = 'cooldown' OR (ap.cooldown_until IS NOT NULL AND ap.cooldown_until > now()))`
 		// Active model block: non-empty blocked_models with at least one entry that is
-		// permanent (true/object without expired until) or until > now().
-		modelBlockExpr := `(
-			EXISTS (
-				SELECT 1
-				FROM jsonb_each(COALESCE(ap.blocked_models, '{}'::jsonb)) AS e(model, value)
-				WHERE
-					-- permanent boolean true
-					(jsonb_typeof(e.value) = 'boolean' AND e.value = 'true'::jsonb)
-					-- bare unix until still in future (number)
-					OR (jsonb_typeof(e.value) = 'number' AND (
-						(e.value::text::float8 > 1000000000000 AND (e.value::text::float8/1000.0) > extract(epoch from now()))
-						OR (e.value::text::float8 > 1577836800 AND e.value::text::float8 <= 1000000000000 AND e.value::text::float8 > extract(epoch from now()))
-						OR (e.value::text::float8 > 0 AND e.value::text::float8 <= 1577836800) -- small permanent markers
-					))
-					-- object form {"until": ...} still active, or permanent object without expired until
-					OR (jsonb_typeof(e.value) = 'object' AND (
-						(e.value ? 'until' AND NULLIF(e.value->>'until','') IS NOT NULL AND (
-							CASE
-								WHEN (e.value->>'until')::float8 > 1000000000000 THEN ((e.value->>'until')::float8/1000.0) > extract(epoch from now())
-								ELSE (e.value->>'until')::float8 > extract(epoch from now())
-							END
-						))
-						OR (NOT (e.value ? 'until') OR NULLIF(e.value->>'until','') IS NULL)
-						OR ((e.value ? 'blocked') AND (e.value->>'blocked') IN ('true','1'))
-					))
-			)
-			OR COALESCE(ap.pool_status,'') = 'model_blocked'
-		)`
+		// permanent (true/object without expired until) or until > now(), or pool_status='model_blocked'.
+		modelBlockExpr := activeModelBlockSQL
 		liveExpr := `(COALESCE(ap.enabled, true) = true
 			AND COALESCE(ap.disabled_for_quota, false) = false
 			AND NOT ` + expiredExpr + `
@@ -659,6 +633,12 @@ func modelBlockEntryActive(entry any, nowUnix float64) bool {
 		if b, ok := v["blocked"].(bool); ok && !b {
 			return false
 		}
+		if bs, ok := v["blocked"].(string); ok {
+			bs = strings.TrimSpace(bs)
+			if bs == "0" || strings.EqualFold(bs, "false") {
+				return false
+			}
+		}
 		if until, ok := v["until"]; ok && until != nil {
 			var u float64
 			switch x := until.(type) {
@@ -673,13 +653,10 @@ func modelBlockEntryActive(entry any, nowUnix float64) bool {
 			case json.Number:
 				u, _ = x.Float64()
 			case string:
-				u, _ = strconv.ParseFloat(x, 64)
-			}
-			if u > 1e12 {
-				u = u / 1000
+				u, _ = strconv.ParseFloat(strings.TrimSpace(x), 64)
 			}
 			if u > 0 {
-				return u > nowUnix
+				return modelBlockEntryActive(u, nowUnix)
 			}
 		}
 		// Object without until (or until=0) => permanent block while present.
@@ -854,18 +831,29 @@ func (c *Connector) GetAccountAuth(ctx context.Context, accountID string) (*Acco
 	return out, nil
 }
 
-// DeleteAccount removes one account and its pool row from PostgreSQL.
+// DeleteAccount removes one account and its pool row from PostgreSQL in a transaction.
 func (c *Connector) DeleteAccount(ctx context.Context, accountID string) (bool, error) {
 	c.InvalidateCandidateCache()
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" {
 		return false, errors.New("account id required")
 	}
-	tag, err := c.Pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, accountID)
+	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
-	_, _ = c.Pool.Exec(ctx, `DELETE FROM account_pool WHERE account_id = $1`, accountID)
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM account_pool WHERE account_id = $1`, accountID); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, accountID)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	c.InvalidatePoolSummaryCache()
 	return tag.RowsAffected() > 0, nil
 }
 
@@ -904,13 +892,15 @@ func (c *Connector) DeleteAccounts(ctx context.Context, accountIDs []string) (ma
 	removed := make([]string, 0, len(ids))
 	missing := make([]string, 0)
 	for _, id := range ids {
+		if _, err := tx.Exec(ctx, `DELETE FROM account_pool WHERE account_id = $1`, id); err != nil {
+			return nil, err
+		}
 		tag, err := tx.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, id)
 		if err != nil {
 			return nil, err
 		}
 		if tag.RowsAffected() > 0 {
 			removed = append(removed, id)
-			_, _ = tx.Exec(ctx, `DELETE FROM account_pool WHERE account_id = $1`, id)
 		} else {
 			missing = append(missing, id)
 		}
@@ -918,6 +908,7 @@ func (c *Connector) DeleteAccounts(ctx context.Context, accountIDs []string) (ma
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	c.InvalidatePoolSummaryCache()
 	return map[string]any{
 		"removed":       removed,
 		"missing":       missing,
@@ -929,35 +920,52 @@ func (c *Connector) DeleteAccounts(ctx context.Context, accountIDs []string) (ma
 
 // ClearAllAccounts wipes every account + pool row.
 func (c *Connector) ClearAllAccounts(ctx context.Context) (int64, error) {
+	c.InvalidateCandidateCache()
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM account_pool`); err != nil {
+		return 0, err
+	}
 	tag, err := tx.Exec(ctx, `DELETE FROM accounts`)
 	if err != nil {
 		return 0, err
 	}
-	_, _ = tx.Exec(ctx, `DELETE FROM account_pool`)
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
+	c.InvalidatePoolSummaryCache()
 	return tag.RowsAffected(), nil
 }
 
-// UpsertAccount writes one account payload and ensures a pool row exists.
+// mergeAccountPayloads merges existing durable fields into the incoming account payload.
+func mergeAccountPayloads(existing, payload map[string]any) map[string]any {
+	return mergeDurableLocal(payload, existing)
+}
+
+// UpsertAccount writes one account payload and ensures a pool row exists inside a transaction.
 func (c *Connector) UpsertAccount(ctx context.Context, accountID string, entry map[string]any) error {
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" || entry == nil {
 		return errors.New("account id and entry required")
 	}
-	// Preserve durable metadata from an existing row.
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock and preserve durable metadata from an existing row.
 	var oldBytes []byte
-	_ = c.Pool.QueryRow(ctx, `SELECT payload FROM accounts WHERE id = $1`, accountID).Scan(&oldBytes)
+	if scanErr := tx.QueryRow(ctx, `SELECT payload FROM accounts WHERE id = $1 FOR UPDATE`, accountID).Scan(&oldBytes); scanErr != nil && !errors.Is(scanErr, pgx.ErrNoRows) {
+		return scanErr
+	}
 	if len(oldBytes) > 0 {
-		entry = mergeDurableLocal(entry, decodeMap(oldBytes))
+		entry = mergeAccountPayloads(decodeMap(oldBytes), entry)
 	} else {
-		entry = mergeDurableLocal(entry, nil)
+		entry = mergeAccountPayloads(nil, entry)
 	}
 
 	email := stringFromMap(entry, "email")
@@ -988,7 +996,7 @@ func (c *Connector) UpsertAccount(ctx context.Context, accountID string, entry m
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO accounts (id, email, user_id, team_id, payload, expires_at, updated_at)
 		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5::jsonb, $6, now())
 		ON CONFLICT (id) DO UPDATE SET
@@ -1002,7 +1010,7 @@ func (c *Connector) UpsertAccount(ctx context.Context, accountID string, entry m
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO account_pool (
 			account_id, enabled, weight, disabled_for_quota, blocked_models,
 			request_count, success_count, fail_count, extra, updated_at,
@@ -1014,7 +1022,15 @@ func (c *Connector) UpsertAccount(ctx context.Context, accountID string, entry m
 		)
 		ON CONFLICT (account_id) DO NOTHING
 	`, accountID)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	c.InvalidateCandidateCache()
+	c.InvalidatePoolSummaryCache()
+	return nil
 }
 
 // ImportNormalizedAccounts merges or replaces accounts from a normalized map.
@@ -1068,16 +1084,22 @@ func (c *Connector) importNormalizedAccountsRowwise(ctx context.Context, normali
 					WHERE id = $1
 					   OR ($2 <> '' AND (user_id = $2 OR payload->>'user_id' = $2 OR payload->>'principal_id' = $2))
 					   OR ($3 <> '' AND payload->>'key' = $3)
+					FOR UPDATE
 				`, aid, uid, token)
 				if qerr == nil {
+					merged := false
 					for rows.Next() {
 						var oldID string
 						var oldBytes []byte
 						if rows.Scan(&oldID, &oldBytes) == nil {
-							entry = mergeDurableLocal(entry, decodeMap(oldBytes))
+							entry = mergeAccountPayloads(decodeMap(oldBytes), entry)
+							merged = true
 						}
 					}
 					rows.Close()
+					if !merged {
+						entry = mergeAccountPayloads(nil, entry)
+					}
 				}
 				if uid != "" && token != "" {
 					_, _ = tx.Exec(ctx, `
@@ -1100,10 +1122,20 @@ func (c *Connector) importNormalizedAccountsRowwise(ctx context.Context, normali
 				`)
 			} else {
 				var oldBytes []byte
-				_ = tx.QueryRow(ctx, `SELECT payload FROM accounts WHERE id = $1`, aid).Scan(&oldBytes)
+				_ = tx.QueryRow(ctx, `SELECT payload FROM accounts WHERE id = $1 FOR UPDATE`, aid).Scan(&oldBytes)
 				if len(oldBytes) > 0 {
-					entry = mergeDurableLocal(entry, decodeMap(oldBytes))
+					entry = mergeAccountPayloads(decodeMap(oldBytes), entry)
+				} else {
+					entry = mergeAccountPayloads(nil, entry)
 				}
+			}
+		} else {
+			var oldBytes []byte
+			_ = tx.QueryRow(ctx, `SELECT payload FROM accounts WHERE id = $1 FOR UPDATE`, aid).Scan(&oldBytes)
+			if len(oldBytes) > 0 {
+				entry = mergeAccountPayloads(decodeMap(oldBytes), entry)
+			} else {
+				entry = mergeAccountPayloads(nil, entry)
 			}
 		}
 
@@ -1223,59 +1255,69 @@ func (c *Connector) importNormalizedAccountsBulk(ctx context.Context, normalized
 	}
 
 	// One SELECT: load existing payloads for durable-field merge + dedupe.
-	if merge {
-		oldByID := map[string]map[string]any{}
-		oldByUID := map[string]map[string]any{}
-		oldByTok := map[string]map[string]any{}
-		qrows, qerr := tx.Query(ctx, `
-			SELECT id, payload FROM accounts
-			WHERE id = ANY($1::text[])
-			   OR (cardinality($2::text[]) > 0 AND (
-			        user_id = ANY($2::text[])
-			     OR payload->>'user_id' = ANY($2::text[])
-			     OR payload->>'principal_id' = ANY($2::text[])
-			   ))
-			   OR (cardinality($3::text[]) > 0 AND payload->>'key' = ANY($3::text[]))
-		`, ids, userIDs, tokens)
-		if qerr == nil {
-			for qrows.Next() {
-				var oid string
-				var pbytes []byte
-				if qrows.Scan(&oid, &pbytes) != nil {
-					continue
-				}
-				old := decodeMap(pbytes)
-				oldByID[oid] = old
-				if uid := firstMapString(old, "user_id", "principal_id"); uid != "" {
-					if _, ok := oldByUID[uid]; !ok {
-						oldByUID[uid] = old
-					}
-				}
-				if tok := firstMapString(old, "key", "access_token", "token"); tok != "" {
-					if _, ok := oldByTok[tok]; !ok {
-						oldByTok[tok] = old
-					}
+	oldByID := map[string]map[string]any{}
+	oldByUID := map[string]map[string]any{}
+	oldByTok := map[string]map[string]any{}
+	qrows, qerr := tx.Query(ctx, `
+		SELECT id, payload FROM accounts
+		WHERE id = ANY($1::text[])
+		   OR (cardinality($2::text[]) > 0 AND (
+		        user_id = ANY($2::text[])
+		     OR payload->>'user_id' = ANY($2::text[])
+		     OR payload->>'principal_id' = ANY($2::text[])
+		   ))
+		   OR (cardinality($3::text[]) > 0 AND payload->>'key' = ANY($3::text[]))
+		FOR UPDATE
+	`, ids, userIDs, tokens)
+	if qerr == nil {
+		for qrows.Next() {
+			var oid string
+			var pbytes []byte
+			if qrows.Scan(&oid, &pbytes) != nil {
+				continue
+			}
+			old := decodeMap(pbytes)
+			oldByID[oid] = old
+			if uid := firstMapString(old, "user_id", "principal_id"); uid != "" {
+				if _, ok := oldByUID[uid]; !ok {
+					oldByUID[uid] = old
 				}
 			}
-			qrows.Close()
+			if tok := firstMapString(old, "key", "access_token", "token"); tok != "" {
+				if _, ok := oldByTok[tok]; !ok {
+					oldByTok[tok] = old
+				}
+			}
 		}
-		for i := range rowsIn {
-			e := rowsIn[i].entry
-			if old, ok := oldByID[rowsIn[i].id]; ok {
-				e = mergeDurableLocal(e, old)
-			}
+		qrows.Close()
+	}
+	for i := range rowsIn {
+		e := rowsIn[i].entry
+		merged := false
+		if old, ok := oldByID[rowsIn[i].id]; ok {
+			e = mergeAccountPayloads(old, e)
+			merged = true
+		}
+		if merge {
 			if uid := firstMapString(e, "user_id", "principal_id"); uid != "" {
 				if old, ok := oldByUID[uid]; ok {
-					e = mergeDurableLocal(e, old)
+					e = mergeAccountPayloads(old, e)
+					merged = true
 				}
 			}
 			if tok := firstMapString(e, "key", "access_token", "token"); tok != "" {
 				if old, ok := oldByTok[tok]; ok {
-					e = mergeDurableLocal(e, old)
+					e = mergeAccountPayloads(old, e)
+					merged = true
 				}
 			}
-			rowsIn[i].entry = e
 		}
+		if !merged {
+			e = mergeAccountPayloads(nil, e)
+		}
+		rowsIn[i].entry = e
+	}
+	if merge {
 		// Drop colliding old rows that would leave ghost duplicates.
 		if len(userIDs) > 0 || len(tokens) > 0 {
 			_, _ = tx.Exec(ctx, `
@@ -1400,6 +1442,11 @@ func (c *Connector) importNormalizedAccountsBulk(ctx context.Context, normalized
 		"storage":        "postgres",
 		"bulk":           true,
 	}, nil
+}
+
+// ReplaceAccounts replaces or merges the durable account set via bulk import.
+func (c *Connector) ReplaceAccounts(ctx context.Context, normalized map[string]map[string]any) (map[string]any, error) {
+	return c.ImportNormalizedAccounts(ctx, normalized, false)
 }
 
 // parseExpiresAtTime normalizes common JSON number/string expiry forms.

@@ -134,14 +134,15 @@ func (v *APIKeyVerifier) Verify(ctx context.Context, token string) (*APIKeyRecor
 	if entry, ok := v.keyCache[h]; ok && now.Before(entry.expires) {
 		rec := cloneAPIKeyRecord(entry.rec)
 		v.mu.Unlock()
-		if rec != nil {
-			// Async usage touch — never block TTFT.
-			go func(id string) {
-				bg, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-				defer cancel()
-				_ = v.store.TouchAPIKeyUsage(bg, id)
-			}(rec.ID)
+		if rec == nil || !rec.Enabled {
+			return nil, nil
 		}
+		// Async usage touch — never block TTFT.
+		go func(id string) {
+			bg, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			_ = v.store.TouchAPIKeyUsage(bg, id)
+		}(rec.ID)
 		return rec, nil
 	}
 	v.mu.Unlock()

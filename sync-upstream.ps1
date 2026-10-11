@@ -4,16 +4,18 @@
 .DESCRIPTION
     工作流：
       1. fetch upstream
-      2. checkout main，merge upstream/main，push 到 origin/main
+      2. checkout main，merge upstream/main（默认不自动推送 origin/main，仅在显式传入 -PushMain 时才推送到 origin/main）
       3. checkout dev，rebase main（如果有冲突需手动解决后 git rebase --continue）
       4. push dev 到 origin/dev
 .NOTES
     在仓库根目录运行： ./sync-upstream.ps1
+    如需同步推送 main 分支到 origin/main，可加参数： ./sync-upstream.ps1 -PushMain
     如需跳过 dev 分支 rebase，可加参数： ./sync-upstream.ps1 -SkipDev
 #>
 
 param(
-    [switch]$SkipDev
+    [switch]$SkipDev,
+    [switch]$PushMain
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,16 +47,21 @@ $behind = [int](git rev-list --count main..upstream/main)
 if ($behind -eq 0) {
     Write-Ok "main 已是最新，无需合并"
 } else {
-    Write-Host "    upstream 领先 $behind 个提交，开始合并 ..."
-    git merge upstream/main
-    if ($LASTEXITCODE -ne 0) { Die "merge upstream/main 出现冲突，请手动解决后 git commit，再重新运行本脚本" }
+    Write-Host "    upstream 领先 $behind 个提交，近期变更预览："
+    git log --oneline main..upstream/main -n 20
+    git merge --ff-only upstream/main
+    if ($LASTEXITCODE -ne 0) { Die "fast-forward 合并失败，请人工审查 upstream/main 变更后手动合并" }
     Write-Ok "merge 完成"
 }
 
-Write-Step "push main -> origin"
-git push origin main
-if ($LASTEXITCODE -ne 0) { Die "push origin main 失败" }
-Write-Ok "main 已推送"
+if ($PushMain) {
+    Write-Step "push main -> origin (-PushMain 已启用)"
+    git push origin main
+    if ($LASTEXITCODE -ne 0) { Die "push origin main 失败" }
+    Write-Ok "main 已推送"
+} else {
+    Write-Warn "默认未自动推送 main（防止未经审查触发镜像发布）。审阅无误后请运行：git push origin main 或加 -PushMain 参数"
+}
 
 # 3. rebase dev 分支
 if ($SkipDev) {

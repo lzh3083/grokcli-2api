@@ -48,6 +48,7 @@ def maintenance_slot(
     wait = MAINTENANCE_LOCK_TIMEOUT if timeout is None else max(0.0, float(timeout))
 
     if _redis_mode():
+        yielded = False
         try:
             from grok2api.store.locks_redis import redis_maintenance_slot
 
@@ -55,6 +56,7 @@ def maintenance_slot(
                 if ok:
                     _holder = owner
                     _held_since = time.time()
+                yielded = True
                 try:
                     yield ok
                 finally:
@@ -63,7 +65,9 @@ def maintenance_slot(
                         _held_since = 0.0
             return
         except Exception:
-            # Fall through to local lock if Redis path fails mid-flight.
+            if yielded:
+                raise
+            # Fall through to local lock only if Redis lock acquisition failed before yield.
             pass
 
     acquired = _lock.acquire(blocking=blocking, timeout=wait if blocking else -1)

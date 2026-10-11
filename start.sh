@@ -4,6 +4,48 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+load_dotenv() {
+  local env_file="${1:-.env}"
+  [[ -f "${env_file}" ]] || return 0
+  local line key val
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    if [[ "${line}" == export[[:space:]]* ]]; then
+      line="${line#export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || continue
+    val="${val#"${val%%[![:space:]]*}"}"
+    if [[ "${val}" =~ ^\"(([^\"\\]|\\.)*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+      val="${val//\\\"/\"}"
+      val="${val//\\\\/\\}"
+    elif [[ "${val}" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      if [[ "${val}" == \#* ]]; then
+        val=""
+      else
+        val="${val%%[[:space:]]#*}"
+        val="${val%"${val##*[![:space:]]}"}"
+      fi
+    fi
+    export "${key}=${val}"
+  done < "${env_file}"
+}
+
+mask_url() {
+  local url="${1:-}"
+  echo "${url}" | sed -E 's|^([a-zA-Z0-9+.-]+://[^/:@]*):(.+)@([^@]+)$|\1:***@\3|'
+}
+
 if [[ ! -f .env ]]; then
   if [[ -f .env.example ]]; then
     cp .env.example .env
@@ -13,13 +55,16 @@ if [[ ! -f .env ]]; then
   fi
 fi
 if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
+  load_dotenv .env
+fi
+
+if [[ "${GROK2API_ADMIN_PASSWORD:-}" == "change-me" ]]; then
+  echo "WARN: Insecure default GROK2API_ADMIN_PASSWORD='change-me' is forbidden; clearing to enforce first-boot setup." >&2
+  export GROK2API_ADMIN_PASSWORD=""
 fi
 
 export GROK2API_RUNTIME="${GROK2API_RUNTIME:-go}"
+export GROK2API_REQUIRE_API_KEY="${GROK2API_REQUIRE_API_KEY:-1}"
 export GROK2API_OPEN_BROWSER="${GROK2API_OPEN_BROWSER:-0}"
 export GROK2API_HOST="${GROK2API_HOST:-0.0.0.0}"
 export GROK2API_PORT="${GROK2API_PORT:-3000}"
@@ -72,8 +117,8 @@ echo "  Admin:     http://127.0.0.1:${PORT}/admin"
 echo "  Health:    http://127.0.0.1:${PORT}/health"
 echo "  OpenAI:    http://127.0.0.1:${PORT}/v1"
 echo "  Runtime:   go"
-echo "  Redis:     ${REDIS_URL}"
-echo "  Database:  ${DATABASE_URL}"
+echo "  Redis:     $(mask_url "${REDIS_URL}")"
+echo "  Database:  $(mask_url "${DATABASE_URL}")"
 echo "  Binary:    ${BIN}"
 echo ""
 

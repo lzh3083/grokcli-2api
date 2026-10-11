@@ -118,7 +118,10 @@ func (s *StreamAssembler) Start(inputTokens int) []string {
 
 func (s *StreamAssembler) Feed(content, reasoning string, calls []ToolDelta) []string {
 	frames := s.Start(0)
-	// When tools are declared, keep TEXT held until a tool arrives / Finish.
+	// When tools are declared, keep TEXT held while no tool has been emitted yet:
+	// if a tool_use is emitted, pre-tool preface text is dropped so the first
+	// tool_use occupies dense block index 0; if the turn finishes without any
+	// tool_use, held text is flushed in Finish.
 	// REASONING must stream live so long Claude Code thinking turns keep the
 	// SSE pipe warm (idle proxies ~60s otherwise cut the connection).
 	if s.toolsRequested && !s.sawTool {
@@ -509,7 +512,7 @@ func (s *StreamAssembler) AckToolsInPayload(payload string) {
 			continue
 		}
 		matched := false
-		if state.id != "" && strings.Contains(payload, state.id) {
+		if state.id != "" && strings.Contains(payload, `"`+state.id+`"`) {
 			matched = true
 		} else if state.id == "" && state.name != "" && strings.Contains(payload, `"name":"`+state.name+`"`) {
 			// Weak match: only when a single unacked tool has this name.
@@ -673,18 +676,24 @@ func (s *StreamAssembler) Finish(finishReason string, usage Usage) []string {
 			}
 		}
 	}
-	// Always emit held text before tools — the model may have produced
-	// explanatory text before the first tool_use and discarding it causes
-	// the client to miss important context.
-	for _, delta := range s.held {
-		frames = append(frames, s.emitText(delta.reasoning, delta.content)...)
-	}
-	s.held = nil
-	frames = append(frames, s.closeThinking()...)
-	frames = append(frames, s.closeText()...)
 	// force=true: after CoerceCompleteJSON, use CompleteJSON (not Strict) so
 	// salvaged/truncated tools still emit instead of vanishing mid-turn.
-	frames = append(frames, s.emitReadyTools(true)...)
+	frames = append(frames, s.closeThinking()...)
+	frames = append(frames, s.closeText()...)
+	toolFrames := s.emitReadyTools(true)
+	if len(toolFrames) > 0 || s.toolsStarted > 0 || s.sawTool {
+		s.dropHeld()
+		frames = append(frames, toolFrames...)
+	} else if len(s.held) > 0 {
+		// No tools emitted in this turn: flush held text and avoid double-counting outputRunes.
+		held := s.held
+		s.dropHeld()
+		for _, delta := range held {
+			frames = append(frames, s.emitText(delta.reasoning, delta.content)...)
+		}
+		frames = append(frames, s.closeThinking()...)
+		frames = append(frames, s.closeText()...)
+	}
 	frames = append(frames, s.closeTools()...)
 
 	if toolsOnly {
@@ -784,7 +793,7 @@ func (s *StreamAssembler) emitReadyTools(force bool) []string {
 		state.clientAcked = false
 		s.toolsStarted++
 		s.sawTool = true
-		s.held = nil
+		s.dropHeld()
 		argsJSON := state.arguments
 		if strings.TrimSpace(argsJSON) == "" {
 			argsJSON = "{}"
@@ -807,6 +816,21 @@ func (s *StreamAssembler) emitReadyTools(force bool) []string {
 		s.pendingClientAcks = append(s.pendingClientAcks, index)
 	}
 	return frames
+}
+
+func (s *StreamAssembler) dropHeld() {
+	if s == nil || len(s.held) == 0 {
+		return
+	}
+	for _, d := range s.held {
+		n := len([]rune(d.content)) + len([]rune(d.reasoning))
+		if s.outputRunes >= n {
+			s.outputRunes -= n
+		} else {
+			s.outputRunes = 0
+		}
+	}
+	s.held = nil
 }
 
 func (s *StreamAssembler) emitText(reasoning, content string) []string {

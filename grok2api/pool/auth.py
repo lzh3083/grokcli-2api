@@ -221,9 +221,8 @@ def list_live_credentials(
         except AuthError:
             continue
         # still usable if has refresh_token even when access near-expired
-        if include_expired or not creds.expired or creds.refresh_token:
-            if include_expired or not creds.expired:
-                out.append(creds)
+        if include_expired or not creds.expired or bool(creds.refresh_token):
+            out.append(creds)
     # newest expiry first for stable ordering
     out.sort(key=lambda c: c.expires_at or 0.0, reverse=True)
     with _live_creds_cache_lock:

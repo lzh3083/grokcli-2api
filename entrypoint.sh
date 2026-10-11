@@ -49,9 +49,49 @@ reg_concurrency="${GROK2API_REG_CONCURRENCY:-3}"
 solver_thread="${TURNSTILE_THREAD:-${reg_concurrency}}"
 solver_browser="${TURNSTILE_BROWSER_TYPE:-camoufox}"
 solver_host="${TURNSTILE_HOST:-127.0.0.1}"
+MAIN_PID=""
+REG_PID=""
+SOLVER_PID=""
+XVFB_PID=""
 solver_pid=""
 reg_pid=""
 xvfb_pid=""
+CLEANED_UP=0
+
+ensure_registration_token() {
+  local data_dir="${GROK2API_DATA_DIR:-/app/data}"
+  if [[ -z "${GROK2API_DATA_DIR:-}" && ! -d /app && -d ./data ]]; then
+    data_dir="./data"
+  fi
+  local token_file="${data_dir}/.registration_token"
+  mkdir -p "$(dirname "${token_file}")" 2>/dev/null || true
+  if [[ -z "${GROK2API_REGISTRATION_TOKEN:-}" ]]; then
+    if [[ -s "${token_file}" ]]; then
+      GROK2API_REGISTRATION_TOKEN="$(tr -d '\r\n' < "${token_file}" 2>/dev/null || true)"
+    fi
+    if [[ -n "${GROK2API_REGISTRATION_TOKEN:-}" ]]; then
+      export GROK2API_REGISTRATION_TOKEN
+      echo "[entrypoint] reusing persisted GROK2API_REGISTRATION_TOKEN from ${token_file}"
+      return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+      GROK2API_REGISTRATION_TOKEN="$(openssl rand -hex 32)"
+    elif command -v python3 >/dev/null 2>&1; then
+      GROK2API_REGISTRATION_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    else
+      GROK2API_REGISTRATION_TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    export GROK2API_REGISTRATION_TOKEN
+    echo "[entrypoint] generated random 32-byte GROK2API_REGISTRATION_TOKEN for sidecar auth"
+  else
+    export GROK2API_REGISTRATION_TOKEN
+  fi
+  if (umask 077 && printf '%s' "${GROK2API_REGISTRATION_TOKEN}" > "${token_file}") 2>/dev/null; then
+    chmod 600 "${token_file}" 2>/dev/null || true
+  else
+    echo "[entrypoint] WARN: failed to persist GROK2API_REGISTRATION_TOKEN to ${token_file}" >&2
+  fi
+}
 
 start_xvfb() {
   if command -v Xvfb >/dev/null 2>&1; then
@@ -62,12 +102,9 @@ start_xvfb() {
       # every non-headless Chromium start fails.
       rm -f "/tmp/.X${DISPLAY#:}-lock" "/tmp/.X11-unix/X${DISPLAY#:}" 2>/dev/null || true
       echo "[entrypoint] starting Xvfb on display ${DISPLAY}"
-      # setsid detaches Xvfb from this shell's process group. Without it the EXIT
-      # trap below fired the moment this script exec'd the Go runtime and killed
-      # Xvfb right after starting it — leaving a stale /tmp/.X11-unix/X99 socket
-      # and making every non-headless Chromium fail with "浏览器连接失败"
-      # (which in turn forced --headless=new and got us Cloudflare-blocked).
       setsid Xvfb "${DISPLAY}" -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 < /dev/null &
+      XVFB_PID=$!
+      xvfb_pid="${XVFB_PID}"
       sleep 1
     fi
   fi
@@ -99,6 +136,10 @@ start_inline_solver() {
   # egresses from the container IP while the registration browser egresses from
   # the configured proxy, and Cloudflare rejects the solved token because the
   # challenge and its redemption come from different addresses.
+  local solver_extra_args=()
+  if [[ "${GROK2API_SOLVER_DEBUG:-0}" == "1" ]]; then
+    solver_extra_args+=(--debug)
+  fi
   (
     cd /app/turnstile-solver
     # Unset API_KEY so inline turnstile-solver does not enforce unexpected clientKey
@@ -109,9 +150,10 @@ start_inline_solver() {
       --host "${solver_host}" \
       --port "${solver_port}" \
       --proxy \
-      --debug
+      "${solver_extra_args[@]}"
   ) > /app/turnstile-solver/logs/turnstile_solver.log 2>&1 &
-  solver_pid=$!
+  SOLVER_PID=$!
+  solver_pid="${SOLVER_PID}"
   echo "${solver_pid}" > /app/turnstile-solver/logs/turnstile_solver.pid
   echo "[entrypoint] turnstile-solver pid=${solver_pid}"
 
@@ -152,7 +194,8 @@ start_registration_sidecar() {
     export PYTHONDONTWRITEBYTECODE=1
     exec python3 -B scripts/registration_service.py
   ) > /app/turnstile-solver/logs/registration_sidecar.log 2>&1 &
-  reg_pid=$!
+  REG_PID=$!
+  reg_pid="${REG_PID}"
   echo "${reg_pid}" > /app/turnstile-solver/logs/registration_sidecar.pid
   echo "[entrypoint] registration sidecar pid=${reg_pid} url=${GROK2API_REGISTRATION_SERVICE_URL}"
 
@@ -175,8 +218,13 @@ stop_pid() {
   local pid="$2"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
     echo "[entrypoint] stopping ${name} pid=${pid}"
-    kill "${pid}" 2>/dev/null || true
-    sleep 1
+    kill -TERM "${pid}" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      if ! kill -0 "${pid}" 2>/dev/null; then
+        return 0
+      fi
+      sleep 0.1
+    done
     kill -9 "${pid}" 2>/dev/null || true
   fi
 }
@@ -230,12 +278,38 @@ run_migrations() {
 }
 
 cleanup() {
-  stop_pid "registration sidecar" "${reg_pid}"
-  stop_pid "turnstile-solver" "${solver_pid}"
-  # Xvfb is deliberately NOT stopped here: it is started with setsid and must
-  # survive this script exec'ing the Go runtime (see start_xvfb).
+  if [[ "${CLEANED_UP}" == "1" ]]; then
+    return 0
+  fi
+  CLEANED_UP=1
+  stop_pid "main app" "${MAIN_PID}"
+  stop_pid "registration sidecar" "${REG_PID}"
+  stop_pid "turnstile-solver" "${SOLVER_PID}"
+  stop_pid "Xvfb" "${XVFB_PID}"
 }
-trap cleanup EXIT INT TERM
+
+handle_signal() {
+  local sig="$1"
+  local rc=0
+  echo "[entrypoint] received ${sig}, forwarding to child processes..."
+  for pid in "${MAIN_PID}" "${REG_PID}" "${SOLVER_PID}" "${XVFB_PID}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "-${sig}" "${pid}" 2>/dev/null || true
+    fi
+  done
+  if [[ -n "${MAIN_PID}" ]]; then
+    wait "${MAIN_PID}" 2>/dev/null || rc=$?
+    MAIN_PID=""
+  fi
+  cleanup
+  exit "${rc}"
+}
+trap 'handle_signal TERM' SIGTERM
+trap 'handle_signal INT' SIGINT
+trap cleanup EXIT
+
+# Ensure shared non-empty registration token between Go main process and Python sidecar
+ensure_registration_token
 
 # Start virtual display for browser automation and solver
 start_xvfb
@@ -264,5 +338,18 @@ if [[ "${runtime}" == "go" && "${GROK2API_REGISTRATION_SIDECAR:-1}" != "0" ]]; t
   start_registration_sidecar
 fi
 
+GROK2API_BIN="${APP_CMD[0]}"
 echo "[entrypoint] starting app (${runtime}): ${APP_CMD[*]}"
-exec "${APP_CMD[@]}"
+if [[ "${#APP_CMD[@]}" -gt 1 ]]; then
+  "${GROK2API_BIN}" "${APP_CMD[@]:1}" &
+else
+  "${GROK2API_BIN}" &
+fi
+MAIN_PID=$!
+echo "[entrypoint] main app pid=${MAIN_PID}"
+set +e
+wait "${MAIN_PID}"
+exit_code=$?
+set -e
+cleanup
+exit "${exit_code}"

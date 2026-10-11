@@ -4,6 +4,41 @@ All notable changes to `grokcli-2api` will be documented in this file.
 
 ---
 
+## [v2.1.7] - 2026-10-12
+
+> **版本分级说明**：本次更新为全栈安全加固、并发可靠性与存储一致性修复版本（Security Hardening & Reliability Release: `v2.1.6` → `v2.1.7`），全面落实 94 项代码审查整改项并通过 `gpt-6-luna` 多轮复审与生产实测验证。
+
+### 🔒 安全加固 (Security Hardening)
+
+- **首启认证与管理端会话安全（C-1, H-6, M-21）**：
+  - 禁用弱默认口令 `change-me` 自动落库，首启 `/admin/api/setup` 强制校验真实回环套接字地址或 `X-Setup-Token`（默认不信任未授权代理伪造的 `X-Forwarded-For`）；
+  - 管理员会话 Token 在 Redis 与 PostgreSQL 中均升级为 SHA-256 哈希键存储，自动平滑迁移历史明文会话键并施加 30 天绝对过期上限；
+  - PostgreSQL 会话更新统一通过 `SELECT ... FOR UPDATE` 行级排他锁事务执行，消除多管理员并发更新覆盖。
+- **容器权限最小化与热更新隔离（C-2, L-21）**：
+  - 默认 `docker-compose.yml` 移除 `/var/run/docker.sock`、宿主机根目录挂载与 `seccomp:unconfined`，默认热更新采用 `request_file` 模式，并将容器内自更新拆分至可选 `docker-compose.hot-update.yml`；
+  - 热更新校验自定义镜像仓库名必须与配置的 `GROK2API_GHCR_IMAGE` 一致。
+- **API Key 与长期凭据保护（H-4, H-5, H-11, H-15, H-17, H-24, M-41）**：
+  - 数据库不再存储或回显 API Key 明文 `secret` 列，启动时自动清洗历史遗留明文列；API Key 撤销/更新后立即淘汰内存缓存；
+  - 容器启动自动生成并持久化 32 字节 `.registration_token`（`0600`），保护 Go 网关与 Python sidecar 间内部接口；
+  - 全面脱敏 SSO Cookie、OAuth Token、Turnstile Token 与代理账密日志，落盘凭据文件强制收紧为 `0600` 权限。
+- **SSRF 与 DNS Rebinding 防护（H-16, M-42）**：
+  - NovProxy、MoeMail、CLIProxyAPI 与 sub2api 客户端全面拦截云元数据地址（`169.254.0.0/16`）、userinfo 与跨源重定向，并在连接阶段锁定校验通过的目标 IP，彻底阻断 DNS Rebinding。
+
+### 🛠️ 并发可靠性与协议修复 (Concurrency & Protocol Fixes)
+
+- **流式探测与内存边界保护（H-1, H-2, H-3, H-7, H-13, H-25）**：
+  - 修复 `peekQualityStream` 在 `QualityWithhold` 与静默流场景下的 Goroutine 泄漏与无限等待；
+  - 限制 `tool_calls.index` 最大槽位（`64`）、空流窥探缓冲区上限（2MB）及全局 HTTP 请求体上限（默认 32MB，文件导入超 16MB 严格返回 413）；
+  - 统一扩充 SSE Scanner 缓冲区至 16MB，修复工具调用 Ack ID 精确匹配与 UTF-8 多字节安全截断。
+- **存储事务与连接池健壮性（H-10, H-26, M-1 ~ M-9, M-32 ~ M-33）**：
+  - `UpsertAccount`、批量导入与账号删除全面事务化并加 `FOR UPDATE` 行锁，完整保留 `refresh_token`/`sso`/`session_cookies` 等 durable 字段；
+  - 修复 PG 模式下 Python 侧删除/清空账号未同步删除数据库记录的问题；
+  - Redis 连接池跟踪所有借出活跃连接并在 `Close()` 时主动中断阻塞读写；统一本地缓存、Redis 与在途队列的键名 SHA-256 归一化与 8192 容量上限。
+- **浏览器注册机多线程会话隔离（H-18 ~ H-23, H-27）**：
+  - 使用 `threading.local()` 彻底隔离并发注册会话的浏览器实例、配置字典、时区/语言与打码代理，消除跨会话污染与进程误杀。
+
+---
+
 ## [v2.1.6] - 2026-10-11
 
 > **版本分级说明**：本次更新是重大能力升级（Feature & Resilience Release），全面落地 Go 核心防降智与假思考拦截引擎（Peek & Hold）、加密思考密文下限验证（Ciphertext Floor）、12 小时降智账号冷却惩罚与全自动静默换号重试容灾，并补齐 Grok CLI / Codex 协议兼容字段（`annotations: []` 与 `response.failed.model`），按语义化版本规范（SemVer）定级为 **次版本/重要特性升级（Feature Release: `v2.1.5` → `v2.1.6`）**。

@@ -36,10 +36,29 @@ func sanitizeUpdateTag(tag string) (string, error) {
 	return tag, nil
 }
 
+func allowCustomUpdateImage() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GROK2API_ALLOW_CUSTOM_UPDATE_IMAGE")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func splitImageRepoAndRef(image string) (repo, tag string) {
+	image = strings.TrimSpace(image)
+	if at := strings.Index(image, "@"); at >= 0 {
+		image = image[:at]
+	}
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		return strings.TrimRight(image[:lastColon], "/"), image[lastColon+1:]
+	}
+	return strings.TrimRight(image, "/"), ""
+}
+
 func sanitizeUpdateImage(image string) (string, error) {
 	image = strings.TrimSpace(image)
+	configuredRepo, _ := splitImageRepoAndRef(ghcrImage())
 	if image == "" {
-		return ghcrImage(), nil
+		return configuredRepo, nil
 	}
 	if strings.ContainsAny(image, "\n\r\t'\"\\;|&$`!") {
 		return "", fmt.Errorf("invalid image %q: contains forbidden characters", image)
@@ -47,7 +66,16 @@ func sanitizeUpdateImage(image string) (string, error) {
 	if !safeImageRe.MatchString(image) {
 		return "", fmt.Errorf("invalid image %q: must match registry/repo format", image)
 	}
-	return image, nil
+	repo, inlineTag := splitImageRepoAndRef(image)
+	if inlineTag != "" {
+		if _, err := sanitizeUpdateTag(inlineTag); err != nil {
+			return "", err
+		}
+	}
+	if !allowCustomUpdateImage() && repo != configuredRepo {
+		return "", fmt.Errorf("custom update image repository %q is not allowed (must match %q)", repo, configuredRepo)
+	}
+	return repo, nil
 }
 
 const (

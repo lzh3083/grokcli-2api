@@ -57,9 +57,13 @@ func (s *Service) Start() {
 		s.mu.Unlock()
 		return
 	}
+	if s.stop == nil {
+		s.stop = make(chan struct{})
+	}
+	stopCh := s.stop
 	s.started = true
 	s.mu.Unlock()
-	go s.loop()
+	go s.loop(stopCh)
 }
 
 func (s *Service) Stop() {
@@ -123,7 +127,9 @@ func (s *Service) Status() map[string]any {
 		"is_leader":           isLeader,
 		"last":                lastCopy,
 	}
-	if rem, ok := s.computeMinRemainingSec(context.Background()); ok {
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer statusCancel()
+	if rem, ok := s.computeMinRemainingSec(statusCtx); ok {
 		out["min_remaining_sec"] = rem
 		lastCopy["min_remaining_sec"] = rem
 		out["last"] = lastCopy
@@ -132,7 +138,9 @@ func (s *Service) Status() map[string]any {
 }
 
 func (s *Service) enrichStatusMinRemaining(out map[string]any) {
-	rem, ok := s.computeMinRemainingSec(context.Background())
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer statusCancel()
+	rem, ok := s.computeMinRemainingSec(statusCtx)
 	if !ok {
 		return
 	}
@@ -143,13 +151,13 @@ func (s *Service) enrichStatusMinRemaining(out map[string]any) {
 	}
 }
 
-func (s *Service) loop() {
+func (s *Service) loop(stopCh <-chan struct{}) {
 	// short startup delay like Python
 	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	for {
 		select {
-		case <-s.stop:
+		case <-stopCh:
 			return
 		case <-timer.C:
 			s.maybeRun(false)

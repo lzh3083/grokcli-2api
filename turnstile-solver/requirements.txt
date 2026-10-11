@@ -1,7 +1,7 @@
 # Local Turnstile Solver (subproject of grokcli-2api)
-quart>=0.19
-camoufox>=0.4
-patchright>=1.50
-rich>=13
-requests>=2.31
-python-dotenv>=1.0
+quart>=0.19,<1.0
+camoufox>=0.4,<1.0
+patchright>=1.50,<2.0
+rich>=13.0,<15.0
+requests>=2.31.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0

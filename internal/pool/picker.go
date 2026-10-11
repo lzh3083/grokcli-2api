@@ -1,8 +1,11 @@
 package pool
 
 import (
+	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +23,7 @@ type Candidate struct {
 	ExpiresAt        *time.Time
 	Enabled          bool
 	DisabledForQuota bool
+	PoolStatus       string
 	CooldownUntil    *time.Time
 	BlockedModels    map[string]any
 	RequestCount     int64
@@ -32,6 +36,14 @@ func (c Candidate) Eligible(model string, now time.Time) bool {
 	}
 	if !c.Enabled || c.DisabledForQuota {
 		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.PoolStatus)) {
+	case "disabled", "quota_disabled", "expired", "cooldown":
+		return false
+	case "model_blocked":
+		if len(c.BlockedModels) == 0 {
+			return false
+		}
 	}
 	if c.ExpiresAt != nil && !c.ExpiresAt.After(now) {
 		return false
@@ -72,17 +84,21 @@ func Chain(candidates []Candidate, model, mode string, now time.Time, max int) [
 }
 
 func sortCandidates(candidates []Candidate, mode string) {
+	if mode == "random" {
+		rand.Shuffle(len(candidates), func(i, j int) {
+			candidates[i], candidates[j] = candidates[j], candidates[i]
+		})
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].Weight > candidates[j].Weight
+		})
+		return
+	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
 		switch mode {
 		case "least_used":
 			if a.RequestCount != b.RequestCount {
 				return a.RequestCount < b.RequestCount
-			}
-		case "random":
-			// Keep Go migration deterministic until parity fixtures cover random mode.
-			if a.Weight != b.Weight {
-				return a.Weight > b.Weight
 			}
 		default: // round_robin: higher weight, then least used, then stable id.
 			// Sticky is force-pinned first by callers; this only ranks the rest.
@@ -106,6 +122,9 @@ func modelBlocked(blocked map[string]any, model string, now time.Time) bool {
 	if !ok {
 		value, ok = blocked[strings.ToLower(model)]
 	}
+	if !ok {
+		value, ok = blocked["*"]
+	}
 	if !ok || value == nil {
 		return false
 	}
@@ -121,15 +140,30 @@ func modelBlocked(blocked map[string]any, model string, now time.Time) bool {
 		return numericBlockActive(float64(v), nowUnix)
 	case int:
 		return numericBlockActive(float64(v), nowUnix)
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			return true
+		}
+		return numericBlockActive(f, nowUnix)
 	case string:
 		s := strings.TrimSpace(v)
 		if s == "" || s == "0" || strings.EqualFold(s, "false") {
 			return false
 		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return numericBlockActive(f, nowUnix)
+		}
 		return true
 	case map[string]any:
 		if b, ok := v["blocked"].(bool); ok && !b {
 			return false
+		}
+		if bs, ok := v["blocked"].(string); ok {
+			bs = strings.TrimSpace(bs)
+			if bs == "0" || strings.EqualFold(bs, "false") {
+				return false
+			}
 		}
 		if until, ok := v["until"]; ok && until != nil {
 			var u float64
@@ -142,14 +176,13 @@ func modelBlocked(blocked map[string]any, model string, now time.Time) bool {
 				u = float64(x)
 			case int64:
 				u = float64(x)
+			case json.Number:
+				u, _ = x.Float64()
 			case string:
-				// ignore parse errors -> treat permanent
-			}
-			if u > 1e12 {
-				u = u / 1000
+				u, _ = strconv.ParseFloat(strings.TrimSpace(x), 64)
 			}
 			if u > 0 {
-				return u > nowUnix
+				return numericBlockActive(u, nowUnix)
 			}
 		}
 		return true
@@ -170,6 +203,6 @@ func numericBlockActive(v, nowUnix float64) bool {
 	if u > 1577836800 {
 		return u > nowUnix
 	}
-	// small numbers like 1 => permanent true
+	// small numbers in (0, 1577836800] like 1 => permanent true
 	return true
 }

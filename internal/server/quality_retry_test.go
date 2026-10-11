@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -201,5 +202,67 @@ func TestPeekQualityStreamPlaintextThinkingDeliversAndReplays(t *testing.T) {
 	}
 	if !strings.Contains(string(replayedBytes), "let me analyze step by step") {
 		t.Fatalf("replay missing prefix text: %s", string(replayedBytes))
+	}
+}
+
+func TestPeekQualityStreamWithholdDoesNotLeakGoroutines(t *testing.T) {
+	degraded := sseLines(
+		`{"choices":[{"delta":{"content":"`+strings.Repeat("word ", 40)+`"}}]}`,
+		`{"usage":{"completion_tokens":45,"completion_tokens_details":{"reasoning_tokens":0}}}`,
+		"[DONE]",
+	)
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 30; i++ {
+		body := io.NopCloser(strings.NewReader(degraded))
+		replayed, verdict, _, _, err := peekQualityStream(
+			context.Background(),
+			body,
+			qualityProtocolChat,
+			QualityRetryRuntime{MinOutputTokens: 8, HoldTimeout: 2 * time.Second},
+		)
+		_ = body.Close()
+		if replayed != nil {
+			_ = replayed.Close()
+		}
+		if err != nil {
+			t.Fatalf("iter %d unexpected error: %v", i, err)
+		}
+		if verdict != QualityWithhold {
+			t.Fatalf("iter %d verdict = %s, want QualityWithhold", i, verdict)
+		}
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	runtime.GC()
+	after := runtime.NumGoroutine()
+	if delta := after - before; delta > 5 {
+		t.Fatalf("goroutine leak detected after 30 QualityWithhold calls: before=%d after=%d delta=%d", before, after, delta)
+	}
+}
+
+func TestPeekQualityStreamSilentUpstreamBoundedWait(t *testing.T) {
+	t.Parallel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	started := time.Now()
+	replayed, verdict, _, _, err := peekQualityStream(
+		context.Background(),
+		pr,
+		qualityProtocolChat,
+		QualityRetryRuntime{MinOutputTokens: 8, HoldTimeout: 25 * time.Millisecond},
+	)
+	if replayed != nil {
+		_ = replayed.Close()
+	}
+	elapsed := time.Since(started)
+	if elapsed > time.Second {
+		t.Fatalf("silent upstream waited too long: %s", elapsed)
+	}
+	if verdict != QualityWithhold && !errors.Is(err, errQualityEmptyStream) {
+		t.Fatalf("expected QualityWithhold or errQualityEmptyStream on silent upstream, got verdict=%s err=%v", verdict, err)
 	}
 }

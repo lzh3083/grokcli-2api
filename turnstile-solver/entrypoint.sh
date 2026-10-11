@@ -2,12 +2,12 @@
 set -euo pipefail
 cd /app
 
-HOST="${TURNSTILE_HOST:-0.0.0.0}"
+HOST="${HOST:-${TURNSTILE_HOST:-127.0.0.1}}"
 PORT="${TURNSTILE_PORT:-5072}"
 THREAD="${TURNSTILE_THREAD:-2}"
 BROWSER_TYPE="${TURNSTILE_BROWSER_TYPE:-camoufox}"
 DEBUG_FLAG=()
-if [[ "${TURNSTILE_DEBUG:-1}" == "1" || "${TURNSTILE_DEBUG:-true}" == "true" ]]; then
+if [[ "${GROK2API_SOLVER_DEBUG:-${TURNSTILE_DEBUG:-0}}" == "1" || "${GROK2API_SOLVER_DEBUG:-${TURNSTILE_DEBUG:-false}}" == "true" ]]; then
   DEBUG_FLAG=(--debug)
 fi
 

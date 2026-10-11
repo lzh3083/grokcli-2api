@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,11 +74,23 @@ func newQualityReadPump(source io.ReadCloser) *qualityReadPump {
 func (p *qualityReadPump) run() {
 	defer close(p.results)
 	buf := make([]byte, 4096)
+	emptyReads := 0
 	for {
 		n, err := p.source.Read(buf)
 		if n == 0 && err == nil {
+			emptyReads++
+			if emptyReads > 16 {
+				select {
+				case <-time.After(time.Millisecond):
+				case <-p.done:
+					return
+				}
+			} else {
+				runtime.Gosched()
+			}
 			continue
 		}
+		emptyReads = 0
 		result := qualityReadResult{err: err}
 		if n > 0 {
 			result.data = append([]byte(nil), buf[:n]...)
@@ -536,6 +549,8 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 		if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
 			if verdict == QualityWithhold {
 				log.Printf("WARN quality hold withheld degraded stream protocol=%s signals=%+v", protocol, sig)
+				_ = pump.Close()
+				return io.NopCloser(bytes.NewReader(held.Bytes())), verdict, state.usage, state.responseID, nil
 			}
 			return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
 		}
@@ -548,10 +563,21 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 			_ = pump.Close()
 			return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, qualityPeekAbortError(ctx, ctx.Err())
 		case <-holdTimer.C:
-			state.holdExpired = true
-			sig.HoldExpired = true
-			if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
-				return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
+			if !state.holdExpired {
+				state.holdExpired = true
+				sig.HoldExpired = true
+				if verdict := ClassifyQualityHold(sig, cfg.MinOutputTokens); verdict != QualityWait {
+					if verdict == QualityWithhold {
+						_ = pump.Close()
+						return io.NopCloser(bytes.NewReader(held.Bytes())), verdict, state.usage, state.responseID, nil
+					}
+					return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
+				}
+				// Bounded grace period when upstream is silent (output <= 0).
+				holdTimer.Reset(cfg.HoldTimeout)
+			} else {
+				_ = pump.Close()
+				return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWithhold, state.usage, state.responseID, errQualityEmptyStream
 			}
 		case result, ok := <-pump.results:
 			if !ok {
@@ -565,6 +591,10 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 					verdict := ClassifyQualityHold(state.signals(), cfg.MinOutputTokens)
 					if verdict == QualityWait {
 						verdict = QualityWithhold
+					}
+					if verdict == QualityWithhold {
+						_ = pump.Close()
+						return io.NopCloser(bytes.NewReader(held.Bytes())), verdict, state.usage, state.responseID, nil
 					}
 					return newPrefixReplay(&held, pump), verdict, state.usage, state.responseID, nil
 				}
@@ -584,6 +614,9 @@ func peekQualityStream(ctx context.Context, body io.ReadCloser, protocol string,
 
 func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *qualityScanState, cfg QualityRetryRuntime) (io.ReadCloser, QualityVerdict, QualityUsage, string, error) {
 	if state == nil {
+		if pump != nil {
+			_ = pump.Close()
+		}
 		return io.NopCloser(bytes.NewReader(nil)), QualityWait, QualityUsage{}, "", errQualityEmptyStream
 	}
 	if len(state.pending) > 0 {
@@ -595,11 +628,18 @@ func finishQualityPeek(held *bytes.Buffer, pump *qualityReadPump, state *quality
 		if state.semanticOutput {
 			return newPrefixReplay(held, pump), QualityDeliver, state.usage, state.responseID, nil
 		}
-		return newPrefixReplay(held, pump), QualityWait, state.usage, state.responseID, errQualityEmptyStream
+		if pump != nil {
+			_ = pump.Close()
+		}
+		return io.NopCloser(bytes.NewReader(held.Bytes())), QualityWait, state.usage, state.responseID, errQualityEmptyStream
 	}
 	verdict := ClassifyQualityHold(signals, cfg.MinOutputTokens)
 	if verdict == QualityWithhold {
 		log.Printf("WARN quality hold withheld degraded stream on finish protocol=%s signals=%+v", state.protocol, signals)
+		if pump != nil {
+			_ = pump.Close()
+		}
+		return io.NopCloser(bytes.NewReader(held.Bytes())), verdict, state.usage, state.responseID, nil
 	}
 	return newPrefixReplay(held, pump), verdict, state.usage, state.responseID, nil
 }

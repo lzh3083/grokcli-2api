@@ -624,7 +624,30 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/settings/sub2api/groups", func(w http.ResponseWriter, r *http.Request) {
 		serveSub2APIGroupsCreate(w, r, options)
 	})
-	return mux
+	return withMaxBodySize(mux)
+}
+
+func maxRequestBodyBytes() int64 {
+	const defaultMaxBodyMB = 32
+	if raw := strings.TrimSpace(os.Getenv("GROK2API_MAX_BODY_MB")); raw != "" {
+		if mb, err := strconv.ParseInt(raw, 10, 64); err == nil && mb > 0 && mb <= 1024 {
+			return mb << 20
+		}
+	}
+	return defaultMaxBodyMB << 20
+}
+
+func isMultipartFileImportPath(path string) bool {
+	return path == "/admin/api/accounts/import-file" || path == "/admin/api/accounts/import-files"
+}
+
+func withMaxBodySize(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r != nil && r.Body != nil && r.Body != http.NoBody && !isMultipartFileImportPath(r.URL.Path) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes())
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func serveModels(w http.ResponseWriter, r *http.Request, options Options) {
@@ -787,6 +810,9 @@ func serveChatCompletions(w http.ResponseWriter, r *http.Request, options Option
 			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(chatReq.Raw) {
 				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolChat, qualityCfg)
 				if peekErr != nil || verdict == QualityWithhold {
+					if replayed != nil {
+						_ = replayed.Close()
+					}
 					_ = opened.Body.Close()
 					releaseServerPick(options, opened.AccountID)
 					cause := peekErr
@@ -1593,12 +1619,62 @@ func requestID(r *http.Request) string {
 	return "go-" + hex.EncodeToString(buf)
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+func remoteIPFromAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return strings.Trim(strings.TrimSpace(host), "[]")
+	}
+	return strings.Trim(addr, "[]")
+}
+
+func isLoopbackIP(ipStr string) bool {
+	ipStr = strings.TrimSpace(ipStr)
+	if ipStr == "" {
+		return false
+	}
+	if ip := net.ParseIP(ipStr); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(ipStr, "localhost")
+}
+
+func isTrustedProxyIP(ipStr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+func trustProxyHeadersEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GROK2API_TRUST_PROXY_HEADERS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func clientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	remoteIP := remoteIPFromAddr(r.RemoteAddr)
+	if trustProxyHeadersEnabled() && isTrustedProxyIP(remoteIP) {
+		if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+			if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
+				return first
+			}
+		}
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
+	}
+	if remoteIP != "" {
+		return remoteIP
 	}
 	return r.RemoteAddr
 }
@@ -1881,6 +1957,9 @@ func serveMessages(w http.ResponseWriter, r *http.Request, options Options) {
 			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(body) {
 				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolAnthropic, qualityCfg)
 				if peekErr != nil || verdict == QualityWithhold {
+					if replayed != nil {
+						_ = replayed.Close()
+					}
 					_ = opened.Body.Close()
 					releaseServerPick(options, opened.AccountID)
 					cause := peekErr
@@ -2432,6 +2511,9 @@ func serveResponses(w http.ResponseWriter, r *http.Request, options Options) {
 			if qualityCfg.Enabled && !qualityRequestDisablesReasoningMap(body) {
 				replayed, verdict, _, _, peekErr := peekQualityStream(r.Context(), opened.Body, qualityProtocolResponses, qualityCfg)
 				if peekErr != nil || verdict == QualityWithhold {
+					if replayed != nil {
+						_ = replayed.Close()
+					}
 					_ = opened.Body.Close()
 					releaseServerPick(options, opened.AccountID)
 					cause := peekErr
@@ -4312,7 +4394,7 @@ func serveAdminStatus(w http.ResponseWriter, r *http.Request, options Options, p
 		return
 	}
 	if protected {
-		if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+		if _, ok := requireAdminSession(r, options); !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 			return
 		}
@@ -4434,7 +4516,7 @@ func serveAdminModels(w http.ResponseWriter, r *http.Request, options Options) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -4676,6 +4758,28 @@ func registrationClient(options Options) *regclient.Client {
 	return regClientCache
 }
 
+func verifyAdminSession(options Options, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if options.AdminSessions != nil && options.AdminSessions.VerifyAdminSession(token) {
+		return true
+	}
+	if options.Store != nil && options.Store.VerifyAdminSession(token) {
+		return true
+	}
+	return false
+}
+
+func requireAdminSession(r *http.Request, options Options) (string, bool) {
+	token := admin.ExtractSession(r)
+	if !verifyAdminSession(options, token) {
+		return "", false
+	}
+	return token, true
+}
+
 func requireAdminReadWrite(w http.ResponseWriter, r *http.Request, options Options, write bool) bool {
 	if write {
 		if !adminWriteAllowed(w, r, options) {
@@ -4684,7 +4788,7 @@ func requireAdminReadWrite(w http.ResponseWriter, r *http.Request, options Optio
 	} else if !adminRouteAllowed(w, r, options) {
 		return false
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return false
 	}
@@ -6461,7 +6565,7 @@ func serveAdminUpdateSettings(w http.ResponseWriter, r *http.Request, options Op
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -6616,7 +6720,7 @@ func adminRouteAllowed(w http.ResponseWriter, r *http.Request, options Options) 
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
 		return false
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return false
 	}
@@ -6904,7 +7008,7 @@ func serveAdminSetAccountEnabled(w http.ResponseWriter, r *http.Request, options
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -7883,9 +7987,14 @@ func serveAdminImportFile(w http.ResponseWriter, r *http.Request, options Option
 		return
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, 16<<20))
+	const maxImportFileBytes = 16 << 20
+	raw, err := io.ReadAll(io.LimitReader(file, maxImportFileBytes+1))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		return
+	}
+	if len(raw) > maxImportFileBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "detail": "file exceeds 16MB limit", "error": "file exceeds 16MB limit"})
 		return
 	}
 	norm := accounts.CollectNormalizedEntries(string(raw))
@@ -7938,8 +8047,18 @@ func serveAdminImportFiles(w http.ResponseWriter, r *http.Request, options Optio
 			fileResults = append(fileResults, map[string]any{"index": i + 1, "ok": false, "error": err.Error()})
 			continue
 		}
-		raw, _ := io.ReadAll(io.LimitReader(f, 16<<20))
+		const maxImportFileBytes = 16 << 20
+		raw, err := io.ReadAll(io.LimitReader(f, maxImportFileBytes+1))
 		f.Close()
+		if err != nil {
+			parseErrors++
+			fileResults = append(fileResults, map[string]any{"index": i + 1, "ok": false, "error": err.Error()})
+			continue
+		}
+		if len(raw) > maxImportFileBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "detail": "file exceeds 16MB limit", "error": "file exceeds 16MB limit"})
+			return
+		}
 		norm := accounts.CollectNormalizedEntries(string(raw))
 		if !norm.OK {
 			parseErrors++
@@ -9493,7 +9612,7 @@ func serveAdminSetAccountStatus(w http.ResponseWriter, r *http.Request, options 
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9565,7 +9684,7 @@ func serveAdminKickAccount(w http.ResponseWriter, r *http.Request, options Optio
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9597,7 +9716,7 @@ func serveAdminClearCooldown(w http.ResponseWriter, r *http.Request, options Opt
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9641,8 +9760,12 @@ func serveAdminSetup(w http.ResponseWriter, r *http.Request, options Options) {
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	// Setup is sensitive: only allow from loopback when no admin password exists yet
-	if ip := clientIP(r); ip != "" && ip != "127.0.0.1" && ip != "::1" && !strings.HasPrefix(ip, "127.") {
+	// Setup is sensitive: only allow from direct loopback connection (never XFF)
+	// or with an explicit setup token when no admin password exists yet.
+	setupToken := strings.TrimSpace(os.Getenv("GROK2API_SETUP_TOKEN"))
+	reqSetupToken := strings.TrimSpace(r.Header.Get("X-Setup-Token"))
+	hasValidSetupToken := setupToken != "" && reqSetupToken != "" && subtle.ConstantTimeCompare([]byte(reqSetupToken), []byte(setupToken)) == 1
+	if ip := remoteIPFromAddr(r.RemoteAddr); ip != "" && !isLoopbackIP(ip) && !hasValidSetupToken {
 		writeJSON(w, http.StatusForbidden, map[string]any{"detail": "admin setup is only allowed from localhost"})
 		return
 	}
@@ -9651,9 +9774,13 @@ func serveAdminSetup(w http.ResponseWriter, r *http.Request, options Options) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
-	password := stringValue(body["password"])
-	if len(password) < 4 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "password must contain at least 4 characters"})
+	password := strings.TrimSpace(stringValue(body["password"]))
+	if len(password) < 8 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "password must contain at least 8 characters"})
+		return
+	}
+	if strings.EqualFold(password, "change-me") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "insecure default password is not allowed"})
 		return
 	}
 	has, err := options.Store.HasAdminPassword(r.Context())
@@ -9679,7 +9806,7 @@ func serveAdminSetup(w http.ResponseWriter, r *http.Request, options Options) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
-	setAdminCookie(w, token)
+	setAdminCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "message": "Admin password created"})
 }
 
@@ -9716,7 +9843,7 @@ func serveAdminLogin(w http.ResponseWriter, r *http.Request, options Options) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
-	setAdminCookie(w, token)
+	setAdminCookie(w, r, token)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token})
 }
 
@@ -9729,7 +9856,7 @@ func serveAdminSession(w http.ResponseWriter, r *http.Request, options Options) 
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": readyReason(options)})
 		return
 	}
-	token, ok := admin.RequireSession(r, options.AdminSessions)
+	token, ok := requireAdminSession(r, options)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "authenticated": false})
 		return
@@ -9754,7 +9881,7 @@ func serveAdminCreateKey(w http.ResponseWriter, r *http.Request, options Options
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9771,6 +9898,9 @@ func serveAdminCreateKey(w http.ResponseWriter, r *http.Request, options Options
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
+	if options.APIKeys != nil {
+		options.APIKeys.InvalidateAllKeys()
+	}
 	// Flat record for existing UI + nested aliases for clients that expect {key, secret}.
 	payload := result.Record.PublicMap()
 	payload["secret"] = result.Secret
@@ -9785,7 +9915,7 @@ func serveAdminUpdateKey(w http.ResponseWriter, r *http.Request, options Options
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9811,6 +9941,9 @@ func serveAdminUpdateKey(w http.ResponseWriter, r *http.Request, options Options
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	if options.APIKeys != nil {
+		options.APIKeys.InvalidateAllKeys()
+	}
 	writeJSON(w, http.StatusOK, rec.PublicMap())
 }
 
@@ -9818,7 +9951,7 @@ func serveAdminRegenerateKey(w http.ResponseWriter, r *http.Request, options Opt
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9826,6 +9959,9 @@ func serveAdminRegenerateKey(w http.ResponseWriter, r *http.Request, options Opt
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
+	}
+	if options.APIKeys != nil {
+		options.APIKeys.InvalidateAllKeys()
 	}
 	payload := result.Record.PublicMap()
 	payload["secret"] = result.Secret
@@ -9837,7 +9973,7 @@ func serveAdminDeleteKey(w http.ResponseWriter, r *http.Request, options Options
 	if !adminWriteAllowed(w, r, options) {
 		return
 	}
-	if _, ok := admin.RequireSession(r, options.AdminSessions); !ok {
+	if _, ok := requireAdminSession(r, options); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"detail": "Admin authentication required"})
 		return
 	}
@@ -9849,6 +9985,9 @@ func serveAdminDeleteKey(w http.ResponseWriter, r *http.Request, options Options
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "api key not found"})
 		return
+	}
+	if options.APIKeys != nil {
+		options.APIKeys.InvalidateAllKeys()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -9870,7 +10009,7 @@ func verifyAdminPassword(ctx context.Context, options Options, password string) 
 		// fallback common env already loaded? use os.Getenv for ADMIN_PASSWORD
 		envPW = strings.TrimSpace(os.Getenv("GROK2API_ADMIN_PASSWORD"))
 	}
-	if envPW != "" && subtle.ConstantTimeCompare([]byte(password), []byte(envPW)) == 1 {
+	if envPW != "" && !strings.EqualFold(envPW, "change-me") && subtle.ConstantTimeCompare([]byte(password), []byte(envPW)) == 1 {
 		return true, nil
 	}
 	return false, nil
@@ -9906,7 +10045,8 @@ func deleteAdminSession(options Options, token string) {
 	}
 }
 
-func setAdminCookie(w http.ResponseWriter, token string) {
+func setAdminCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secure := r != nil && (r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https"))
 	http.SetCookie(w, &http.Cookie{
 		Name:     admin.AdminCookie,
 		Value:    token,
@@ -9914,7 +10054,7 @@ func setAdminCookie(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
-		Secure:   true,
+		Secure:   secure,
 	})
 }
 

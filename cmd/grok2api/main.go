@@ -79,21 +79,34 @@ func main() {
 			}
 			repairDone()
 
+			// One-shot: scrub historical plaintext API key secrets from database.
+			scrubCtx, scrubDone := context.WithTimeout(context.Background(), 10*time.Second)
+			if n, err := store.ScrubPlaintextAPIKeySecrets(scrubCtx); err != nil {
+				slog.Warn("scrub plaintext api key secrets failed", "error", err)
+			} else if n > 0 {
+				slog.Info("scrubbed legacy plaintext api key secrets", "keys", n)
+			}
+			scrubDone()
+
 			// Seed admin password from env on first boot
 			if envPW := strings.TrimSpace(os.Getenv("GROK2API_ADMIN_PASSWORD")); envPW != "" {
-				seedCtx, seedDone := context.WithTimeout(context.Background(), 5*time.Second)
-				has, err := store.HasAdminPassword(seedCtx)
-				if err == nil && !has {
-					hash, salt, err := adminauth.NewPassword(envPW)
-					if err == nil {
-						if err := store.SetAdminPassword(seedCtx, hash, salt); err != nil {
-							slog.Warn("failed to seed admin password from env", "error", err)
-						} else {
-							slog.Info("admin password seeded from GROK2API_ADMIN_PASSWORD")
+				if strings.EqualFold(envPW, "change-me") {
+					slog.Warn("GROK2API_ADMIN_PASSWORD is set to insecure default 'change-me'; refusing to seed admin password")
+				} else {
+					seedCtx, seedDone := context.WithTimeout(context.Background(), 5*time.Second)
+					has, err := store.HasAdminPassword(seedCtx)
+					if err == nil && !has {
+						hash, salt, err := adminauth.NewPassword(envPW)
+						if err == nil {
+							if err := store.SetAdminPassword(seedCtx, hash, salt); err != nil {
+								slog.Warn("failed to seed admin password from env", "error", err)
+							} else {
+								slog.Info("admin password seeded from GROK2API_ADMIN_PASSWORD")
+							}
 						}
 					}
+					seedDone()
 				}
-				seedDone()
 			}
 		}
 	}

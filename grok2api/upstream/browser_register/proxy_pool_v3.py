@@ -25,6 +25,8 @@ _MAX_SOURCE_BYTES = 2 << 20
 _TLS = threading.local()
 _MANAGER_LOCK = threading.RLock()
 _MANAGER = None
+_MANAGER_SIG = None
+_PENDING_CONFIG = None
 
 
 class ProxyPoolError(RuntimeError):
@@ -914,28 +916,49 @@ class ProxyPoolManager:
 
 
 def get_manager(config=None, log=None):
-    global _MANAGER
-    if config is None:
-        from app_config import config as app_config
-        config = app_config
-    signature = _config_signature(config)
+    global _MANAGER, _MANAGER_SIG, _PENDING_CONFIG
     with _MANAGER_LOCK:
+        if config is None:
+            if _PENDING_CONFIG is not None:
+                config = _PENDING_CONFIG
+            else:
+                from app_config import config as app_config
+                config = app_config
+        signature = _config_signature(config)
         if _MANAGER is None:
             _MANAGER = ProxyPoolManager(config, log=log)
-        elif _MANAGER.signature != signature and _MANAGER.total_inflight() == 0:
-            old = _MANAGER; _MANAGER = ProxyPoolManager(config, log=log); old.shutdown()
+            _MANAGER_SIG = signature
+            _PENDING_CONFIG = None
+        elif (_MANAGER_SIG != signature or _MANAGER.signature != signature):
+            if _MANAGER.total_inflight() == 0:
+                old = _MANAGER
+                _MANAGER = ProxyPoolManager(config, log=log)
+                _MANAGER_SIG = signature
+                _PENDING_CONFIG = None
+                old.shutdown()
+            else:
+                # Keep _MANAGER_SIG unchanged while inflight > 0 so it rebuilds once inflight hits 0
+                _PENDING_CONFIG = dict(config)
+                if log is not None:
+                    _MANAGER.log = log
+                    _MANAGER._runtime.log = log
         elif log is not None:
-            _MANAGER.log = log; _MANAGER._runtime.log = log
+            _MANAGER.log = log
+            _MANAGER._runtime.log = log
         return _MANAGER
 
 
 def reset_manager():
-    global _MANAGER
+    global _MANAGER, _MANAGER_SIG, _PENDING_CONFIG
     with _MANAGER_LOCK:
         if _MANAGER is not None and _MANAGER.total_inflight() > 0:
             raise ProxyPoolError("仍有代理租约使用中，不能重置代理池")
-        old = _MANAGER; _MANAGER = None
-    if old is not None: old.shutdown()
+        old = _MANAGER
+        _MANAGER = None
+        _MANAGER_SIG = None
+        _PENDING_CONFIG = None
+    if old is not None:
+        old.shutdown()
 
 
 def current_proxy_lease(): return getattr(_TLS, "lease", None)
@@ -963,12 +986,23 @@ def begin_registration_slot(slot_index, attempt_index=1, worker_key=None, log=No
 def end_registration_slot(success=False, transport_error=None):
     lease = current_proxy_lease()
     if lease is None: return
-    manager = get_manager()
+    manager = _MANAGER or get_manager()
     try:
         if transport_error is not None: manager.report_transport_failure(lease, transport_error)
         elif success: manager.report_success(lease)
     finally:
         manager.release(lease); _TLS.lease = None
+        if _PENDING_CONFIG is not None and manager.total_inflight() == 0:
+            try:
+                get_manager(log=getattr(manager, "log", None))
+            except Exception as exc:
+                warn_msg = "[!] 代理池租约释放后自动重建失败: %s" % safe_proxy_error_text(exc)
+                try:
+                    if getattr(manager, "log", None):
+                        manager.log(warn_msg)
+                except Exception:
+                    pass
+                print(warn_msg, flush=True)
 
 
 def report_current_transport_failure(error):

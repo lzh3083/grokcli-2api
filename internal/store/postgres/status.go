@@ -65,25 +65,44 @@ func (c *Connector) KeyStats(ctx context.Context, legacyEnvKey bool, authRequire
 	}, nil
 }
 
-// activeModelBlockSQL is shared by PoolSummary + list filters. A row is model-blocked
-// only when blocked_models has at least one currently active entry.
-const activeModelBlockSQL = `
+const safeModelBlockUntilFloat8SQL = `(CASE WHEN jsonb_typeof(e.value->'until') = 'number' OR (e.value->>'until') ~ '^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (e.value->>'until')::float8 ELSE 0 END)`
+
+// activeModelBlockEntriesSQL checks whether blocked_models has at least one currently active
+// or permanent entry (including (0, 1577836800] permanent numeric markers).
+const activeModelBlockEntriesSQL = `
 EXISTS (
   SELECT 1
   FROM jsonb_each(COALESCE(ap.blocked_models, '{}'::jsonb)) AS e(model, value)
   WHERE
     (jsonb_typeof(e.value) = 'boolean' AND e.value = 'true'::jsonb)
-    OR (jsonb_typeof(e.value) = 'number' AND (e.value #>> '{}')::double precision > EXTRACT(EPOCH FROM now()))
+    OR (jsonb_typeof(e.value) = 'number' AND (
+      (e.value::text::float8 > 1000000000000 AND (e.value::text::float8 / 1000.0) > EXTRACT(EPOCH FROM now()))
+      OR (e.value::text::float8 > 1577836800 AND e.value::text::float8 <= 1000000000000 AND e.value::text::float8 > EXTRACT(EPOCH FROM now()))
+      OR (e.value::text::float8 > 0 AND e.value::text::float8 <= 1577836800)
+    ))
     OR (
       jsonb_typeof(e.value) = 'object'
       AND (
-        (e.value ? 'until' AND COALESCE((e.value->>'until')::double precision, 0) > EXTRACT(EPOCH FROM now()))
-        OR (NOT (e.value ? 'until'))
-        OR ((e.value ? 'blocked') AND (e.value->>'blocked') IN ('true','1'))
+        (e.value ? 'until' AND NULLIF(e.value->>'until', '') IS NOT NULL AND (
+          CASE
+            WHEN ` + safeModelBlockUntilFloat8SQL + ` > 1000000000000 THEN (` + safeModelBlockUntilFloat8SQL + ` / 1000.0) > EXTRACT(EPOCH FROM now())
+            WHEN ` + safeModelBlockUntilFloat8SQL + ` > 1577836800 THEN ` + safeModelBlockUntilFloat8SQL + ` > EXTRACT(EPOCH FROM now())
+            ELSE ` + safeModelBlockUntilFloat8SQL + ` > 0
+          END
+        ))
+        OR (NOT (e.value ? 'until') OR NULLIF(e.value->>'until', '') IS NULL)
+        OR ((e.value ? 'blocked') AND (e.value->>'blocked') IN ('true', '1'))
       )
     )
 )
 `
+
+// activeModelBlockSQL is shared by PoolSummary + list filters. A row is model-blocked
+// when blocked_models has at least one currently active/permanent entry or pool_status='model_blocked'.
+const activeModelBlockSQL = `(
+  ` + activeModelBlockEntriesSQL + `
+  OR COALESCE(ap.pool_status, '') = 'model_blocked'
+)`
 
 // Short TTL cache for admin /status auto-refresh. 7k-account full scan is ~0.5s;
 // without caching, Cloudflare/nginx idle limits return HTML 502 on /admin/api/status.
@@ -364,7 +383,7 @@ func (c *Connector) RepairFreeUsageModelBlocks(ctx context.Context) (int64, erro
 		  END,
 		  updated_at = now()
 		WHERE COALESCE(ap.pool_status, '') = 'model_blocked'
-		  AND NOT (`+activeModelBlockSQL+`)
+		  AND NOT (`+activeModelBlockEntriesSQL+`)
 		  AND (ap.cooldown_until IS NULL OR ap.cooldown_until <= now())
 	`)
 	// 5) Intentionally NOT auto-clearing pool_status='cooldown' when until expires.

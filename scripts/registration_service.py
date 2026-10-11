@@ -18,6 +18,7 @@ Captcha browser pool itself is the sibling process turnstile-solver
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import secrets
 import sys
@@ -47,10 +48,65 @@ app = FastAPI(title="grok2api registration internal API", version="1.0.0")
 API_PREFIX = "/internal/registration/v1"
 
 
+_TOKEN_LOCK = threading.Lock()
+_CACHED_REG_TOKEN = ""
+
+
+def _resolve_registration_token() -> str:
+    global _CACHED_REG_TOKEN
+    env_tok = (os.environ.get("GROK2API_REGISTRATION_TOKEN") or "").strip()
+    if env_tok:
+        return env_tok
+    if _CACHED_REG_TOKEN:
+        return _CACHED_REG_TOKEN
+    with _TOKEN_LOCK:
+        if _CACHED_REG_TOKEN:
+            return _CACHED_REG_TOKEN
+        data_dir = Path(os.environ.get("GROK2API_DATA_DIR") or (ROOT / "data"))
+        token_file = data_dir / ".registration_token"
+        try:
+            if token_file.is_file():
+                tok = token_file.read_text(encoding="utf-8").strip()
+                if tok:
+                    try:
+                        os.chmod(token_file, 0o600)
+                    except OSError:
+                        pass
+                    _CACHED_REG_TOKEN = tok
+                    os.environ["GROK2API_REGISTRATION_TOKEN"] = tok
+                    return tok
+        except Exception:
+            pass
+        tok = secrets.token_hex(32)
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            token_file.write_text(tok, encoding="utf-8")
+            os.chmod(token_file, 0o600)
+        except Exception:
+            pass
+        _CACHED_REG_TOKEN = tok
+        os.environ["GROK2API_REGISTRATION_TOKEN"] = tok
+        return tok
+
+
+def _is_loopback_client(request: Request) -> bool:
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "").strip()
+    if not host or host in ("localhost", "testclient"):
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(host.strip("[]"))
+        return bool(ip_obj.is_loopback)
+    except ValueError:
+        return False
+
+
 def _require_auth(request: Request) -> None:
-    expected = (os.environ.get("GROK2API_REGISTRATION_TOKEN") or "").strip()
+    if not _is_loopback_client(request):
+        raise HTTPException(status_code=403, detail="registration sidecar only accepts loopback requests")
+    expected = _resolve_registration_token()
     if not expected:
-        return
+        raise HTTPException(status_code=503, detail="registration token not initialized")
     auth = (request.headers.get("authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="registration token required")
@@ -468,6 +524,7 @@ async def start_job(
 #   (c) hard-cap the returned list so body stays well under the 4MB read limit.
 # ACTIVE (non-terminal) sessions are never pruned, so in-flight work is safe.
 _LIST_CACHE: dict[str, Any] = {"t": 0.0, "data": None}
+_LIST_CACHE_LOCK = threading.Lock()
 _LIST_CACHE_TTL = 2.0
 _PRUNE_LAST = {"t": 0.0}
 _PRUNE_INTERVAL = 30.0
@@ -544,8 +601,11 @@ def list_sessions(request: Request) -> dict[str, Any]:
     # even when Redis still holds thousands of terminal rows.
     _kick_prune_background()
     now = time.time()
-    if _LIST_CACHE["data"] is not None and (now - _LIST_CACHE["t"]) < _LIST_CACHE_TTL:
-        return _jsonable(_LIST_CACHE["data"])
+    with _LIST_CACHE_LOCK:
+        cached_data = _LIST_CACHE["data"]
+        cached_t = _LIST_CACHE["t"]
+    if cached_data is not None and (now - cached_t) < _LIST_CACHE_TTL:
+        return _jsonable(cached_data)
     data = adapter.list_registration_sessions()
     if isinstance(data, dict) and "sessions" in data:
         sessions = data.get("sessions") or []
@@ -579,8 +639,9 @@ def list_sessions(request: Request) -> dict[str, Any]:
         }
     else:
         result = data
-    _LIST_CACHE["data"] = result
-    _LIST_CACHE["t"] = time.time()
+    with _LIST_CACHE_LOCK:
+        _LIST_CACHE["data"] = result
+        _LIST_CACHE["t"] = time.time()
     return _jsonable(result)
 
 
@@ -901,6 +962,11 @@ async def extract_novproxy(request: Request) -> dict[str, Any]:
     import asyncio
     import concurrent.futures
 
+    try:
+        novproxy.validate_novproxy_url(api_base)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"NovProxy URL 校验失败: {exc}") from exc
+
     out_path = "/app/data/novproxy_nodes.txt"
     try:
         def _do_extract() -> list[dict[str, Any]]:
@@ -1029,11 +1095,12 @@ def _get_scheduler() -> Any:
         try:
             from grok2api.upstream.auto_register_scheduler import AutoRegisterScheduler
 
-            _SCHEDULER = AutoRegisterScheduler(
+            sched = AutoRegisterScheduler(
                 start_job_fn=_start_registration_from_body,
                 get_adapter_fn=lambda: reg,
             )
-            _SCHEDULER.start()
+            sched.start()
+            _SCHEDULER = sched
         except Exception as exc:
             print(f"[registration_service] Failed to start AutoRegisterScheduler: {exc}", flush=True)
             return None

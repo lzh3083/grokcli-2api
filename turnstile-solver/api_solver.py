@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import uuid
@@ -52,9 +53,20 @@ class CustomLogger(logging.Logger):
         super().error(self.format_message('ERROR', 'RED', message), *args, **kwargs)
 
 
+def _mask_proxy(proxy_str: Optional[str]) -> str:
+    if not proxy_str:
+        return ""
+    s = str(proxy_str).strip()
+    s = re.sub(r"://([^/@:]+):([^/@]+)@", r"://***:***@", s)
+    parts = s.split(":")
+    if len(parts) == 5 and "://" not in s:
+        s = f"{parts[0]}:{parts[1]}:{parts[2]}:***:***"
+    return s
+
+
 logging.setLoggerClass(CustomLogger)
 logger: CustomLogger = logging.getLogger("TurnstileAPIServer")  # type: ignore
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
 logger.addHandler(handler)
 
@@ -64,6 +76,7 @@ class TurnstileAPIServer:
     def __init__(self, headless: bool, useragent: Optional[str], debug: bool, browser_type: str, thread: int, proxy_support: bool, use_random_config: bool = False, browser_name: Optional[str] = None, browser_version: Optional[str] = None):
         self.app = Quart(__name__)
         self.debug = debug
+        logger.setLevel(logging.DEBUG if self.debug else logging.INFO)
         self.browser_type = browser_type
         self.headless = headless
         # Hard cap browser pool size — Camoufox is hundreds of MB each.
@@ -1117,6 +1130,10 @@ class TurnstileAPIServer:
             context_options["extra_http_headers"] = {"sec-ch-ua": str(sec_ch_ua).strip()}
 
         if proxy:
+            if proxy.lower().startswith("socks5h://"):
+                proxy = "socks5://" + proxy[len("socks5h://"):]
+            elif proxy.lower().startswith("socks4a://"):
+                proxy = "socks4://" + proxy[len("socks4a://"):]
             if "@" in proxy:
                 scheme_part, auth_part = proxy.split("://", 1)
                 auth, address = auth_part.split("@", 1)
@@ -1131,6 +1148,8 @@ class TurnstileAPIServer:
                 parts = proxy.split(":")
                 if len(parts) == 5:
                     proxy_scheme, proxy_ip, proxy_port, proxy_user, proxy_pass = parts
+                    if proxy_scheme.lower() == "socks5h":
+                        proxy_scheme = "socks5"
                     context_options["proxy"] = {
                         "server": f"{proxy_scheme}://{proxy_ip}:{proxy_port}",
                         "username": proxy_user,
@@ -1139,11 +1158,19 @@ class TurnstileAPIServer:
                 elif len(parts) == 3:
                     context_options["proxy"] = {"server": proxy}
                 else:
-                    raise ValueError(f"Invalid proxy format: {proxy}")
+                    raise ValueError(f"Invalid proxy format: {_mask_proxy(proxy)}")
 
         return context_options
 
-    async def _solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
+    async def _solve_turnstile(
+        self,
+        task_id: str,
+        url: str,
+        sitekey: str,
+        action: Optional[str] = None,
+        cdata: Optional[str] = None,
+        proxy_override: Optional[str] = None,
+    ):
         """Solve the Turnstile challenge.
 
         Single-task multi-round: on timeout / empty token, close context and
@@ -1207,14 +1234,19 @@ class TurnstileAPIServer:
                     logger.warning(f"Browser {index}: Cannot check browser state: {str(e)}")
 
             proxy = None
-            if self.proxy_support:
+            override_clean = str(proxy_override or "").strip()
+            if override_clean:
+                proxy = override_clean
+                if self.debug:
+                    logger.debug(f"Browser {index}: Using proxy override: {_mask_proxy(proxy)}")
+            elif self.proxy_support:
                 proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
                 try:
                     with open(proxy_file_path) as proxy_file:
                         proxies = [line.strip() for line in proxy_file if line.strip()]
                     proxy = random.choice(proxies) if proxies else None
                     if self.debug and proxy:
-                        logger.debug(f"Browser {index}: Selected proxy: {proxy}")
+                        logger.debug(f"Browser {index}: Selected proxy: {_mask_proxy(proxy)}")
                     elif self.debug and not proxy:
                         logger.debug(f"Browser {index}: No proxies available")
                 except FileNotFoundError:
@@ -1235,7 +1267,8 @@ class TurnstileAPIServer:
                         )
 
                     context_options = self._build_context_options(
-                        browser_config or {}, proxy if self.proxy_support else None
+                        browser_config or {},
+                        proxy if (self.proxy_support or bool(override_clean)) else None,
                     )
                     try:
                         context = await browser.new_context(**context_options)
@@ -1271,7 +1304,7 @@ class TurnstileAPIServer:
                     if self.debug:
                         logger.debug(
                             f"Browser {index}: Starting Turnstile solve for URL: {url} "
-                            f"with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {proxy}"
+                            f"with Sitekey: {sitekey} | Action: {action} | Cdata: {cdata} | Proxy: {_mask_proxy(proxy)}"
                         )
 
                     try:
@@ -1357,7 +1390,7 @@ class TurnstileAPIServer:
                                         elapsed_time = round(time.time() - start_time, 3)
                                         logger.success(
                                             f"Browser {index}: Successfully solved captcha - "
-                                            f"{COLORS.get('MAGENTA')}{token[:10]}{COLORS.get('RESET')} "
+                                            f"{COLORS.get('MAGENTA')}len={len(token)}{COLORS.get('RESET')} "
                                             f"in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} "
                                             f"Seconds (round {round_i})"
                                         )
@@ -1393,7 +1426,7 @@ class TurnstileAPIServer:
                                             )
                                             logger.success(
                                                 f"Browser {index}: Successfully solved captcha - "
-                                                f"{COLORS.get('MAGENTA')}{element_token[:10]}"
+                                                f"{COLORS.get('MAGENTA')}len={len(element_token)}"
                                                 f"{COLORS.get('RESET')} in "
                                                 f"{COLORS.get('GREEN')}{elapsed_time}"
                                                 f"{COLORS.get('RESET')} Seconds (round {round_i})"
@@ -1528,12 +1561,54 @@ class TurnstileAPIServer:
 
 
 
-    def _check_client_key(self, client_key: Optional[str]) -> Optional[dict]:
-        """校验 clientKey。未设置 API_KEY 时跳过鉴权。"""
+    _ALLOWED_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h", "socks4"})
+
+    @classmethod
+    def _validate_proxy_override(cls, raw_proxy: Optional[str]) -> tuple[Optional[str], Optional[dict]]:
+        """校验非空 proxy 参数仅包含合法代理 scheme（http, https, socks5, socks5h, socks4）。"""
+        text = str(raw_proxy or "").strip()
+        if not text:
+            return None, None
+        if any(c in text for c in ("\r", "\n", "\x00", " ", "\t")):
+            return None, {
+                "errorId": 1,
+                "errorCode": "ERROR_INVALID_PROXY",
+                "errorDescription": "Invalid characters in proxy parameter",
+            }
+        scheme = ""
+        if "://" in text:
+            scheme_part, rest = text.split("://", 1)
+            scheme = scheme_part.strip().lower()
+            if not rest.strip():
+                return None, {
+                    "errorId": 1,
+                    "errorCode": "ERROR_INVALID_PROXY",
+                    "errorDescription": "Empty proxy host",
+                }
+        else:
+            parts = text.split(":")
+            if len(parts) in (3, 5):
+                scheme = parts[0].strip().lower()
+        if scheme not in cls._ALLOWED_PROXY_SCHEMES:
+            return None, {
+                "errorId": 1,
+                "errorCode": "ERROR_INVALID_PROXY",
+                "errorDescription": "Proxy scheme must be one of: http, https, socks5, socks5h, socks4",
+            }
+        return text, None
+
+    def _check_client_key(self, client_key: Optional[str] = None) -> Optional[dict]:
+        """校验 clientKey 或 X-API-Key。未设置 API_KEY 时跳过鉴权。"""
         expected = os.getenv("API_KEY", "").strip()
         if not expected:
             return None
-        if not client_key or client_key.strip() != expected:
+        header_key = ""
+        try:
+            header_key = (request.headers.get("X-API-Key") or "").strip()
+        except Exception:
+            header_key = ""
+        provided = (client_key or "").strip() or header_key
+        if not provided or provided != expected:
             return {
                 "errorId": 1,
                 "errorCode": "ERROR_KEY_DOES_NOT_EXIST",
@@ -1547,6 +1622,7 @@ class TurnstileAPIServer:
         sitekey: str,
         action: Optional[str] = None,
         cdata: Optional[str] = None,
+        proxy_override: Optional[str] = None,
     ):
         """创建任务并异步求解，返回 (task_id, error_response)。"""
         if not url or not sitekey:
@@ -1555,6 +1631,10 @@ class TurnstileAPIServer:
                 "errorCode": "ERROR_WRONG_PAGEURL",
                 "errorDescription": "Both 'url' and 'sitekey' are required"
             }
+
+        validated_proxy, proxy_err = self._validate_proxy_override(proxy_override)
+        if proxy_err:
+            return None, proxy_err
 
         task_id = str(uuid.uuid4())
         await save_result(task_id, "turnstile", {
@@ -1574,6 +1654,7 @@ class TurnstileAPIServer:
                     sitekey=sitekey,
                     action=action,
                     cdata=cdata,
+                    proxy_override=validated_proxy,
                 )
             )
             if self.debug:
@@ -1630,12 +1711,22 @@ class TurnstileAPIServer:
 
     async def process_turnstile(self):
         """Handle the /turnstile endpoint requests."""
+        auth_err = self._check_client_key(request.args.get('clientKey'))
+        if auth_err:
+            return jsonify(auth_err), 200
         url = request.args.get('url')
         sitekey = request.args.get('sitekey')
         action = request.args.get('action')
         cdata = request.args.get('cdata')
+        proxy = request.args.get('proxy')
+        if proxy is not None and str(proxy).strip():
+            proxy, proxy_err = self._validate_proxy_override(proxy)
+            if proxy_err:
+                return jsonify(proxy_err), 200
 
-        task_id, err = await self._enqueue_turnstile(url, sitekey, action, cdata)
+        task_id, err = await self._enqueue_turnstile(
+            url, sitekey, action, cdata, proxy_override=proxy
+        )
         if err:
             return jsonify(err), 200
         return jsonify({"errorId": 0, "taskId": task_id}), 200
@@ -1698,7 +1789,20 @@ class TurnstileAPIServer:
             action = action or metadata.get("action")
             cdata = cdata or metadata.get("cdata")
 
-        task_id, err = await self._enqueue_turnstile(url, sitekey, action, cdata)
+        proxy = (
+            request.args.get("proxy")
+            or task.get("proxy")
+            or body.get("proxy")
+            or (metadata.get("proxy") if isinstance(metadata, dict) else None)
+        )
+        if proxy is not None and str(proxy).strip():
+            proxy, proxy_err = self._validate_proxy_override(proxy)
+            if proxy_err:
+                return jsonify(proxy_err), 200
+
+        task_id, err = await self._enqueue_turnstile(
+            url, sitekey, action, cdata, proxy_override=proxy
+        )
         if err:
             return jsonify(err), 200
         return jsonify({"errorId": 0, "taskId": task_id}), 200

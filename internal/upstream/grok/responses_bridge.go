@@ -519,7 +519,7 @@ type responsesBridge struct {
 
 func translateOrPassthroughSSE(reader io.Reader, writer io.Writer) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 
 	var (
 		mode string // "", "chat", "responses"
@@ -815,7 +815,25 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 			}
 		}
 		return nil
+	case "response.failed", "error":
+		if resp, _ := event["response"].(map[string]any); resp != nil {
+			b.captureMeta(resp)
+			if errVal := resp["error"]; errVal != nil {
+				encoded, _ := json.Marshal(map[string]any{"error": errVal})
+				return []string{string(encoded)}
+			}
+		}
+		if errVal := event["error"]; errVal != nil {
+			encoded, _ := json.Marshal(map[string]any{"error": errVal})
+			return []string{string(encoded)}
+		}
+		encoded, _ := json.Marshal(event)
+		return []string{string(encoded)}
 	default:
+		if errVal := event["error"]; errVal != nil {
+			encoded, _ := json.Marshal(map[string]any{"error": errVal})
+			return []string{string(encoded)}
+		}
 		return nil
 	}
 }

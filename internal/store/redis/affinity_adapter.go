@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -53,7 +52,7 @@ func (a ChatAffinity) BindResponseAccount(ctx context.Context, responseID, accou
 	}
 	// Local first: next Codex turn with previous_response_id must recover pck+account.
 	responseCacheSet(responseID, accountID, promptCacheKey)
-	if pck := stringsTrim(promptCacheKey); pck != "" {
+	if pck := normalizeAffinityCacheKey(promptCacheKey); pck != "" {
 		// Also pin model-less pck fingerprint immediately.
 		affinityCacheSet("chat:prompt_cache_key:"+pck, accountID)
 		// Schedule pck sticky write (coalesced) so model-less recovery stays durable.
@@ -82,15 +81,16 @@ func (a ChatAffinity) GetResponseAccount(ctx context.Context, responseID string)
 	if err != nil || entry == nil {
 		return "", "", err
 	}
-	responseCacheSet(responseID, entry.AccountID, entry.PromptCacheKey)
-	if entry.PromptCacheKey != "" && entry.AccountID != "" {
-		affinityCacheSet("chat:prompt_cache_key:"+entry.PromptCacheKey, entry.AccountID)
+	normPCK := normalizeAffinityCacheKey(entry.PromptCacheKey)
+	responseCacheSet(responseID, entry.AccountID, normPCK)
+	if normPCK != "" && entry.AccountID != "" {
+		affinityCacheSet("chat:prompt_cache_key:"+normPCK, entry.AccountID)
 	}
-	return entry.AccountID, entry.PromptCacheKey, nil
+	return entry.AccountID, normPCK, nil
 }
 
 func (a ChatAffinity) ClearAffinity(ctx context.Context, fingerprint string) error {
-	fingerprint = strings.TrimSpace(fingerprint)
+	fingerprint = normalizeAffinityCacheKey(fingerprint)
 	if fingerprint == "" {
 		return nil
 	}

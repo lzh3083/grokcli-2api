@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 var nonName = regexp.MustCompile(`[^a-z0-9_]+`)
@@ -3272,12 +3273,19 @@ func extractShellCmdValue(argsJSON string) string {
 	return text
 }
 
+var logSecretRE = regexp.MustCompile(`(?i)(bearer\s+[A-Za-z0-9._\-]+|sk-[A-Za-z0-9._\-]{8,}|(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*[^\s"';&]+)`)
+
 func truncateForLog(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = logSecretRE.ReplaceAllString(s, "[REDACTED]")
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	sub := s[:n]
+	for len(sub) > 0 && !utf8.ValidString(sub) {
+		sub = sub[:len(sub)-1]
+	}
+	return sub + "…"
 }
 
 // Codex shell outbound policy (cache-safe):

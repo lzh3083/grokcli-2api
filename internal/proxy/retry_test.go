@@ -68,7 +68,7 @@ func TestShouldRetry(t *testing.T) {
 		{
 			name: "generic error",
 			err:  errors.New("some error"),
-			want: false,
+			want: true,
 		},
 	}
 

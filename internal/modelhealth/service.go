@@ -209,21 +209,29 @@ func (s *Service) Start() {
 		s.mu.Unlock()
 		return
 	}
+	if s.stop == nil {
+		s.stop = make(chan struct{})
+	}
+	stopCh := s.stop
 	s.started = true
 	s.mu.Unlock()
-	go s.loop()
+	go s.loop(stopCh)
 }
 
 func (s *Service) Stop() {
 	s.mu.Lock()
-	if !s.started {
-		s.mu.Unlock()
-		return
+	if s.started {
+		s.started = false
+		close(s.stop)
+		s.stop = make(chan struct{})
 	}
-	s.started = false
-	close(s.stop)
-	s.stop = make(chan struct{})
 	s.mu.Unlock()
+
+	s.jobMu.Lock()
+	if s.jobCancel != nil {
+		s.jobCancel()
+	}
+	s.jobMu.Unlock()
 }
 
 func (s *Service) RequestRunSoon() {
@@ -296,7 +304,9 @@ func (s *Service) Status() map[string]any {
 	s.jobMu.Unlock()
 	out["job"] = jobCopy
 	if s.Store != nil && batch > 0 && interval > 0 {
-		if n, err := s.Store.CountEnabledAccounts(context.Background()); err == nil && n > 0 {
+		statusCtx, statusCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer statusCancel()
+		if n, err := s.Store.CountEnabledAccounts(statusCtx); err == nil && n > 0 {
 			// Match runWave adaptive batch so ETA is not wildly pessimistic.
 			effBatch := batch
 			if workers > 0 {
@@ -328,16 +338,25 @@ func (s *Service) Status() map[string]any {
 	return out
 }
 
-func (s *Service) loop() {
+func (s *Service) currentInterval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Interval <= 0 {
+		return 3 * time.Minute
+	}
+	return s.Interval
+}
+
+func (s *Service) loop(stopCh <-chan struct{}) {
 	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()
 	for {
 		select {
-		case <-s.stop:
+		case <-stopCh:
 			return
 		case <-timer.C:
 			s.maybeRun()
-			timer.Reset(s.Interval)
+			timer.Reset(s.currentInterval())
 		case <-s.runSoon:
 			s.maybeRun()
 			if !timer.Stop() {
@@ -346,7 +365,7 @@ func (s *Service) loop() {
 				default:
 				}
 			}
-			timer.Reset(s.Interval)
+			timer.Reset(s.currentInterval())
 		}
 	}
 }
@@ -416,11 +435,23 @@ func (s *Service) StartProbeAll() map[string]any {
 
 	// Fresh sweep generation for this manual job so we do not inherit a half-covered
 	// background generation (which made "全部模型探测" look stuck / incomplete).
-	_ = s.startSweep(context.Background())
+	// startSweep only performs synchronous Redis/local sweep metadata initialization;
+	// the async multi-wave worker below runs under ctx (managed by s.jobCancel).
+	sweepCtx, sweepCancel := context.WithTimeout(ctx, 3*time.Second)
+	st := s.startSweep(sweepCtx)
+	sweepCancel()
+	if st.Generation > 0 {
+		s.jobMu.Lock()
+		if s.job != nil {
+			s.job["sweep_generation"] = st.Generation
+		}
+		s.jobMu.Unlock()
+		jobSnap["sweep_generation"] = st.Generation
+	}
 
 	go func() {
+		defer cancel()
 		result := s.runManualAll(ctx, "manual_all")
-		cancel()
 		s.jobMu.Lock()
 		s.jobRunning = false
 		s.jobCancel = nil
@@ -1540,7 +1571,8 @@ func (s *Service) loadSweep(ctx context.Context) redis.SweepState {
 
 func (s *Service) startSweep(ctx context.Context) redis.SweepState {
 	if s.Redis != nil && s.Redis.Enabled() {
-		if st, err := s.Redis.StartModelHealthSweep(ctx, s.sweepTTLSec()); err == nil {
+		st, err := s.Redis.StartModelHealthSweep(ctx, s.sweepTTLSec())
+		if err == nil {
 			// Mirror locally for Status() without Redis round-trip.
 			s.localSweepMu.Lock()
 			s.localSweepGen = st.Generation
@@ -1549,6 +1581,7 @@ func (s *Service) startSweep(ctx context.Context) redis.SweepState {
 			s.localSweepMu.Unlock()
 			return st
 		}
+		slog.Warn("model health: failed to initialize redis sweep; falling back to local sweep", "error", err)
 	}
 	now := time.Now()
 	s.localSweepMu.Lock()

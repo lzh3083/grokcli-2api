@@ -824,9 +824,9 @@ func (s *LiveStreamer) AckToolsInPayload(payload string) {
 			continue
 		}
 		matched := false
-		if state.itemID != "" && strings.Contains(payload, state.itemID) {
+		if state.itemID != "" && strings.Contains(payload, `"`+state.itemID+`"`) {
 			matched = true
-		} else if state.id != "" && strings.Contains(payload, state.id) {
+		} else if state.id != "" && strings.Contains(payload, `"`+state.id+`"`) {
 			matched = true
 		}
 		if !matched {

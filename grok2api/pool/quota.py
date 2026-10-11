@@ -493,12 +493,12 @@ def fetch_quota_by_account_id(account_id: str) -> dict[str, Any]:
     return fetch_quota_for_creds(creds)
 
 
-async def fetch_all_quotas(
+def _fetch_all_quotas_sync(
     *,
     include_expired: bool = False,
     max_workers: int | None = None,
 ) -> dict[str, Any]:
-    """Query quota for every live account concurrently; auto-disable exhausted ones."""
+    """Synchronous implementation of fetch_all_quotas."""
     try:
         from grok2api.config import QUOTA_WORKERS
     except Exception:
@@ -589,6 +589,21 @@ async def fetch_all_quotas(
         "total_remaining": total_remaining,
         "accounts": results,
     }
+
+
+async def fetch_all_quotas(
+    *,
+    include_expired: bool = False,
+    max_workers: int | None = None,
+) -> dict[str, Any]:
+    """Query quota for every live account concurrently without blocking the event loop."""
+    import asyncio
+
+    return await asyncio.to_thread(
+        _fetch_all_quotas_sync,
+        include_expired=include_expired,
+        max_workers=max_workers,
+    )
 
 
 def list_cached_quotas(*, include_expired: bool = True) -> dict[str, Any]:

@@ -8,6 +8,7 @@ PostgreSQL `app_settings` under key `auto_register_scheduler_state`.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 STATE_SETTING_KEY = "auto_register_scheduler_state"
 MAX_HISTORY_ITEMS = 25
+try:
+    STALE_SESSION_TIMEOUT_SEC = max(
+        180.0,
+        float(os.environ.get("GROK2API_SCHEDULER_STALE_SESSION_SEC", "900") or 900.0),
+    )
+except (TypeError, ValueError):
+    STALE_SESSION_TIMEOUT_SEC = 900.0
 
 TERMINAL_SESSION_STATUSES = frozenset({
     "success", "completed", "done", "failed", "error", "stopped",
@@ -168,6 +176,13 @@ class AutoRegisterScheduler:
         self._manual_trigger_pending = False
         self._manual_trigger_count: int | None = None
         self._last_cfg_signature: tuple[Any, ...] | None = None
+        self._state_loaded = False
+        self._pending_backfill_history: list[dict[str, Any]] | None = None
+
+    def _ensure_state_loaded(self) -> None:
+        if self._state_loaded:
+            return
+        self._state_loaded = True
         self._load_persisted_state()
 
     def _load_persisted_state(self) -> None:
@@ -194,8 +209,10 @@ class AutoRegisterScheduler:
                         ):
                             if k in saved and saved[k] is not None:
                                 self._state[k] = saved[k]
-                    # Backfill historical scheduler runs into task_logs if missing
-                    self._backfill_history_to_task_logs(saved.get("history"))
+                    # Defer DB write backfill to background tick
+                    hist = saved.get("history")
+                    if isinstance(hist, list) and hist:
+                        self._pending_backfill_history = hist
         except Exception as exc:
             logger.warning("Failed to load persisted scheduler state: %s", exc)
 
@@ -447,20 +464,27 @@ class AutoRegisterScheduler:
                     continue
                 st = str(s.get("status") or "").strip().lower()
                 if st and st not in TERMINAL_SESSION_STATUSES and not s.get("finished"):
-                    # Check age: any session older than 600s (10 min) is definitely stale/abandoned,
-                    # not a currently-running live browser session!
+                    # Check age: any session older than STALE_SESSION_TIMEOUT_SEC (default 900s) is stale/abandoned
+                    stale_sec = STALE_SESSION_TIMEOUT_SEC
+                    try:
+                        stale_sec = max(
+                            180.0,
+                            float(os.environ.get("GROK2API_SCHEDULER_STALE_SESSION_SEC", str(STALE_SESSION_TIMEOUT_SEC)) or STALE_SESSION_TIMEOUT_SEC),
+                        )
+                    except (TypeError, ValueError):
+                        stale_sec = STALE_SESSION_TIMEOUT_SEC
                     ua = float(s.get("updated_at") or s.get("created_at") or 0)
-                    if ua and (now - ua) > 600.0:
+                    if ua and (now - ua) > stale_sec:
                         sid = str(s.get("id") or "").strip()
                         if sid:
                             try:
                                 adapter.stop_registration_session(sid)
-                            except Exception:
-                                pass
+                            except Exception as stop_exc:
+                                logger.warning("Failed to stop stale registration session %s: %s", sid, stop_exc)
                         continue
                     return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to check external active sessions: %s", exc)
         return False
 
     def _check_active_sessions_settled(self) -> tuple[bool, int, int, list[str]]:
@@ -557,7 +581,13 @@ class AutoRegisterScheduler:
                                 if imp_res.get("ok"):
                                     imported_ok += 1
                                     rescued = True
-                        except Exception:
+                        except Exception as rescue_exc:
+                            logger.warning(
+                                "Auto-rescue SSO import failed for session %s (%s): %s",
+                                sid,
+                                email_val,
+                                rescue_exc,
+                            )
                             rescued = False
 
                     if not rescued:
@@ -567,9 +597,11 @@ class AutoRegisterScheduler:
 
             return True, imported_ok, failed_n, notes
         except Exception as exc:
+            logger.warning("Error checking active sessions settlement: %s", exc)
             return False, 0, 0, [str(exc)]
 
     def get_status(self) -> dict[str, Any]:
+        self._ensure_state_loaded()
         full_cfg = self._read_full_reg_config()
         cfg = extract_auto_register_config(full_cfg)
         pool = self._get_pool_counts()
@@ -617,6 +649,11 @@ class AutoRegisterScheduler:
             self._wake_event.clear()
 
     def _tick(self) -> None:
+        self._ensure_state_loaded()
+        if self._pending_backfill_history:
+            hist_to_backfill = self._pending_backfill_history
+            self._pending_backfill_history = None
+            self._backfill_history_to_task_logs(hist_to_backfill)
         full_cfg = self._read_full_reg_config()
         cfg = extract_auto_register_config(full_cfg)
         now = time.time()

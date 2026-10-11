@@ -24,6 +24,8 @@ _watch_thread: threading.Thread | None = None
 _stop = threading.Event()
 _started = False
 _maintainers_started = False
+_token_maintainer_started = False
+_model_health_started = False
 
 
 def _want_force_leader() -> bool | None:
@@ -70,34 +72,47 @@ def status() -> dict[str, Any]:
 
 def _start_maintainers_if_needed() -> None:
     """Idempotently start token + model maintainers on the elected leader."""
-    global _maintainers_started
+    global _maintainers_started, _token_maintainer_started, _model_health_started
     with _lock:
         if _maintainers_started:
             return
-        _maintainers_started = True
-    try:
-        import grok2api.pool.token_maintainer as token_maintainer
+        need_token = not _token_maintainer_started
+        need_model = not _model_health_started
+    tok_ok = not need_token
+    if need_token:
+        try:
+            import grok2api.pool.token_maintainer as token_maintainer
 
-        token_maintainer.start_background()
-        print("  [leader] token maintainer started", flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [leader] token maintainer start failed: {e}", flush=True)
-    try:
-        import grok2api.pool.model_health as model_health
+            token_maintainer.start_background()
+            tok_ok = True
+            print("  [leader] token maintainer started", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [leader] token maintainer start failed: {e}", flush=True)
+    mod_ok = not need_model
+    if need_model:
+        try:
+            import grok2api.pool.model_health as model_health
 
-        model_health.start_background()
-        print("  [leader] model health started", flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [leader] model health start failed: {e}", flush=True)
+            model_health.start_background()
+            mod_ok = True
+            print("  [leader] model health started", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [leader] model health start failed: {e}", flush=True)
+    with _lock:
+        _token_maintainer_started = tok_ok
+        _model_health_started = mod_ok
+        _maintainers_started = bool(tok_ok and mod_ok)
 
 
 def _stop_maintainers_if_needed() -> None:
     """Stop maintainers when leadership is lost (best-effort)."""
-    global _maintainers_started
+    global _maintainers_started, _token_maintainer_started, _model_health_started
     with _lock:
-        if not _maintainers_started:
+        if not (_maintainers_started or _token_maintainer_started or _model_health_started):
             return
         _maintainers_started = False
+        _token_maintainer_started = False
+        _model_health_started = False
     try:
         import grok2api.pool.token_maintainer as token_maintainer
 

@@ -312,6 +312,10 @@ def save_oauth_record(
         "scope": token.get("scope", ""),
     }
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return path
 
 
@@ -415,6 +419,10 @@ def save_cliproxyapi_auth_record(
         fname = f"xai-{safe}"
     path = target / f"{fname}.json"
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return path
 
 

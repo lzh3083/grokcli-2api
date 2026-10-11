@@ -75,6 +75,9 @@ func TestBuildAccountListWhereStatus(t *testing.T) {
 	if !containsFold(where, "blocked_models") {
 		t.Fatalf("model_blocked where=%q", where)
 	}
+	if !strings.Contains(where, `^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$`) {
+		t.Fatalf("model_blocked SQL must guard until float8 cast against dirty strings: %q", where)
+	}
 }
 
 func containsFold(s, sub string) bool {
@@ -101,5 +104,20 @@ func TestActiveBlockedModelsObjectForm(t *testing.T) {
 		if _, ok := out[k]; !ok {
 			t.Fatalf("missing active block %s: %#v", k, out)
 		}
+	}
+}
+
+func TestAPIKeyRecordPublicMapNeverExposesPlainSecret(t *testing.T) {
+	sec := "sk-g2a-plain-secret-value"
+	rec := APIKeyRecord{
+		ID:      "k1",
+		Name:    "test",
+		Prefix:  "sk-g2a-plain",
+		Secret:  &sec,
+		Enabled: true,
+	}
+	pub := rec.PublicMap()
+	if _, exists := pub["secret"]; exists {
+		t.Fatalf("PublicMap must not expose plain secret: %#v", pub)
 	}
 }

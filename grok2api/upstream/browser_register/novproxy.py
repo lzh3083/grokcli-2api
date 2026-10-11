@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
+from urllib.parse import urlparse
 
 DEFAULT_API = "https://white.novproxy.com/white/api"
 _PROXY_LINE_RE = re.compile(r"^(?P<host>[A-Za-z0-9._-]+):(?P<port>\d{1,5})$")
@@ -66,14 +69,62 @@ def parse_proxy_lines(text):
             continue
         for pattern, reason in _ERROR_HINTS:
             if pattern.search(line):
-                raise NovProxyError("%s（服务端返回: %s）" % (reason, line[:120]))
+                raise NovProxyError(reason)
         if len(line) > 2 and ":" not in line:
-            raise NovProxyError("提取接口返回异常内容: %s" % line[:200])
+            raise NovProxyError(f"提取接口返回异常内容（长度={len(line)}）")
     return proxies
 
 
+def validate_novproxy_url(url_str: str) -> tuple[str, str, int, str]:
+    raw = str(url_str or DEFAULT_API).strip() or DEFAULT_API
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https") or not parsed.hostname:
+        raise NovProxyError("NovProxy API URL 仅允许 http/https 协议且主机名不能为空")
+    if parsed.username is not None or parsed.password is not None or "@" in (parsed.netloc or ""):
+        raise NovProxyError("NovProxy API URL 禁止包含账号密码 (userinfo)")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise NovProxyError("NovProxy API URL 端口非法") from exc
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if not (1 <= int(port) <= 65535):
+        raise NovProxyError(f"NovProxy API URL 端口超出合法范围 (1-65535): {port}")
+    host = parsed.hostname.strip()
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception as exc:
+        raise NovProxyError(f"无法解析 NovProxy API 主机名: {host}") from exc
+    if not infos:
+        raise NovProxyError(f"无法解析 NovProxy API 主机名: {host}")
+    validated_ips: list[str] = []
+    for info in infos:
+        ip_str = info[4][0]
+        if "%" in ip_str:
+            ip_str = ip_str.split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError as exc:
+            raise NovProxyError(f"非法 IP 地址: {ip_str}") from exc
+        if (
+            ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_private
+            or ip_obj.is_multicast
+            or ip_obj.is_unspecified
+            or ip_obj.is_reserved
+        ):
+            raise NovProxyError(f"拒绝访问内网或受限地址: {ip_str}")
+        if ip_str not in validated_ips:
+            validated_ips.append(ip_str)
+    if not validated_ips:
+        raise NovProxyError(f"无法解析 NovProxy API 主机名: {host}")
+    return raw, host, int(port), validated_ips[0]
+
+
 def build_extract_url(api_base, region="US", num=10, minutes=120, fmt=1, kind="txt"):
-    base = str(api_base or DEFAULT_API).strip() or DEFAULT_API
+    base, _, _, _ = validate_novproxy_url(api_base)
     sep = "&" if "?" in base else "?"
     return "%s%sregion=%s&num=%d&time=%d&format=%d&type=%s" % (
         base, sep, region, int(num), int(minutes), int(fmt), kind)
@@ -104,10 +155,12 @@ def fetch_nodes(api_base, region="US", num=10, minutes=120, timeout=45.0, attemp
 
 def _curl(url, timeout, proxy=""):
     """用 curl 发请求。proxy 非空时走 SOCKS5（远端解析域名）。"""
-    cmd = ["curl", "-s", "-m", str(int(timeout))]
+    cmd = ["curl", "-s", "--max-redirs", "0", "-m", str(int(timeout))]
     if proxy:
-        cmd += ["--socks5-hostname", proxy]
-    cmd.append(url)
+        cmd += ["--socks5-hostname", proxy, url]
+    else:
+        normalized_url, hostname, port, validated_ip = validate_novproxy_url(url)
+        cmd += ["--resolve", f"{hostname}:{port}:{validated_ip}", normalized_url]
     import subprocess
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
     return out.stdout or ""

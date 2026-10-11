@@ -16,6 +16,7 @@ Legacy browser (DrissionPage) and grpc-session registration engines were removed
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -341,7 +342,8 @@ def _persist_registration_sso(
     if not cookie:
         return ""
     try:
-        REGISTER_SSO_DIR.mkdir(parents=True, exist_ok=True)
+        REGISTER_SSO_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(REGISTER_SSO_DIR, 0o700)
     except Exception:
         pass
     ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
@@ -363,6 +365,10 @@ def _persist_registration_sso(
     }
     try:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return str(path)
     except Exception as e:  # noqa: BLE001
         print(f"[grok-build-auth] WARN: write SSO backup failed: {e}")
@@ -3086,7 +3092,8 @@ def _run_registration(
             update("registering", "visiting signup page")
             _check_cancel()
             client = XConsoleAuthClient(
-                debug=True,
+                debug=os.environ.get("GROK2API_XCONSOLE_DEBUG", "").strip().lower()
+                in ("1", "true", "yes"),
                 proxy=proxy or "",
                 signup_url="https://accounts.x.ai/sign-up?redirect=grok-com",
             )
@@ -3527,7 +3534,7 @@ def _run_registration(
                 print(f"[grok-build-auth] create_account set-cookies count={len(sc)}")
                 print(f"[grok-build-auth] create_account ok={bool(getattr(res, 'ok', False))}")
                 print(f"[grok-build-auth] create_account error={signup_err!r}")
-                print(f"[grok-build-auth] create_account rsc_body preview: {rsc_preview}")
+                print(f"[grok-build-auth] create_account rsc_body len={len(rsc_body)}")
                 print(f"[grok-build-auth] adapter_build={ADAPTER_BUILD}")
                 sess["create_account_http"] = http_status
                 sess["create_account_ok_flag"] = bool(getattr(res, "ok", False))
@@ -3537,11 +3544,22 @@ def _run_registration(
     
                 # Persist full body for offline diagnosis (truncated).
                 try:
+                    safe_sid_dbg = "".join(
+                        ch if ch.isalnum() or ch in "-_" else "_" for ch in str(sid or "x")
+                    )[:64]
                     debug_path = (
-                        ROOT / "data" / "register_sso" / f"{sid}.create_account.rsc.txt"
+                        ROOT / "data" / "register_sso" / f"{safe_sid_dbg}.create_account.rsc.txt"
                     )
-                    debug_path.parent.mkdir(parents=True, exist_ok=True)
+                    debug_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    try:
+                        os.chmod(debug_path.parent, 0o700)
+                    except OSError:
+                        pass
                     debug_path.write_text(rsc_body[:200_000], encoding="utf-8")
+                    try:
+                        os.chmod(debug_path, 0o600)
+                    except OSError:
+                        pass
                 except Exception:
                     pass
     
@@ -3761,12 +3779,22 @@ def _run_registration(
                             sso_attempts.append("cookie_jar_final")
                     except Exception:
                         pass
+                _sso_desc = (
+                    f"len={len(sso)} sha256={hashlib.sha256(sso.encode('utf-8')).hexdigest()[:8]}"
+                    if sso
+                    else None
+                )
                 print(
                     f"[grok-build-auth] CreateSession fallback sso="
-                    f"{(sso[:60] if sso else None)} attempts={sso_attempts}"
+                    f"{_sso_desc} attempts={sso_attempts}"
                 )
     
-            print(f"[grok-build-auth] fetch_sso_token result: {sso[:60] if sso else None}")
+            _final_sso_desc = (
+                f"len={len(sso)} sha256={hashlib.sha256(sso.encode('utf-8')).hexdigest()[:8]}"
+                if sso
+                else None
+            )
+            print(f"[grok-build-auth] fetch_sso_token result: {_final_sso_desc}")
             sess["sso"] = sso
             sess["sso_attempts"] = list(sso_attempts)
             session_cookies = extract_cookies_from_auth_client(client)

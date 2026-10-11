@@ -22,7 +22,20 @@ from __future__ import annotations
 
 import os
 import json
+import re
+import threading
 import time
+import urllib.parse
+
+_PROXIES_FILE_LOCK = threading.Lock()
+_tls = threading.local()
+
+
+def _mask_proxy(proxy_str: str) -> str:
+    if not proxy_str:
+        return ""
+    s = str(proxy_str).strip()
+    return re.sub(r"://([^/@:]+):([^/@]+)@", r"://***:***@", s)
 
 DEFAULT_API_BASE = "https://api.yescaptcha.com"
 CREATE_PATH = "/createTask"
@@ -63,10 +76,20 @@ class YesCaptchaClient:
         url = self.api_base + path
         body = dict(payload)
         body["clientKey"] = self.client_key
+        headers = {}
+        reg_token = str(os.environ.get("GROK2API_REGISTRATION_TOKEN") or "").strip()
+        if reg_token and is_local_endpoint(self.api_base):
+            headers["X-API-Key"] = reg_token
         text = ""
         if self.http_post is not None:
             try:
-                response = self.http_post(url, json=body, timeout=30)
+                if headers:
+                    try:
+                        response = self.http_post(url, json=body, headers=headers, timeout=30)
+                    except TypeError:
+                        response = self.http_post(url, json=body, timeout=30)
+                else:
+                    response = self.http_post(url, json=body, timeout=30)
             except Exception as exc:
                 raise CaptchaError("请求打码平台失败: %s" % exc)
             status = getattr(response, "status_code", 200)
@@ -79,7 +102,10 @@ class YesCaptchaClient:
             except Exception as exc:  # pragma: no cover - 依赖缺失
                 raise CaptchaError("缺少 curl_cffi，无法请求打码平台: %s" % exc)
             try:
-                response = curl_requests.post(url, json=body, timeout=30)
+                post_kwargs = {"json": body, "timeout": 30}
+                if headers:
+                    post_kwargs["headers"] = headers
+                response = curl_requests.post(url, **post_kwargs)
             except Exception as exc:
                 raise CaptchaError("请求打码平台失败: %s" % exc)
             text = getattr(response, "text", "") or ""
@@ -94,7 +120,7 @@ class YesCaptchaClient:
         return data
 
     # ---- 主流程 ----
-    def solve_turnstile(self, website_url, website_key, timeout_sec=None):
+    def solve_turnstile(self, website_url, website_key, timeout_sec=None, proxy=""):
         """解 Turnstile，返回 {"token": str, "user_agent": str}。
 
         失败抛 CaptchaError。任何情况下都不会返回空 token。
@@ -105,8 +131,26 @@ class YesCaptchaClient:
             raise CaptchaError("缺少 websiteURL 或 websiteKey")
         budget = max(10.0, float(timeout_sec or self.timeout_sec))
 
-        created = self._post(CREATE_PATH, {
-            "task": {"type": TASK_TYPE, "websiteURL": url, "websiteKey": key}
+        raw_proxy = str(proxy or "").strip()
+        if not raw_proxy:
+            cfg = _get_bound_config()
+            if isinstance(cfg, dict):
+                for k in ("captcha_solver_proxy", "proxy"):
+                    v = str(cfg.get(k) or "").strip()
+                    if v and v.lower() not in ("direct", "none", "off", "0"):
+                        raw_proxy = v
+                        break
+        if not raw_proxy:
+            raw_proxy = current_registration_proxy()
+        proxy_val = solver_proxy_line(raw_proxy)
+        task_payload = {"type": TASK_TYPE, "websiteURL": url, "websiteKey": key}
+        create_path = CREATE_PATH
+        if proxy_val and is_local_endpoint(self.api_base):
+            task_payload["proxy"] = proxy_val
+            create_path = f"{CREATE_PATH}?{urllib.parse.urlencode({'proxy': proxy_val})}"
+
+        created = self._post(create_path, {
+            "task": task_payload
         })
         if int(created.get("errorId") or 0) != 0:
             raise CaptchaError("创建任务失败: %s" % _describe(created))
@@ -411,7 +455,15 @@ def bind_runtime(namespace):
     """Receive the adapter's runtime cfg (mirrors registration_browser.bind_runtime)."""
     global _BOUND_CONFIG
     if isinstance(namespace, dict):
+        _tls.bound_config = dict(namespace)
         _BOUND_CONFIG = namespace
+
+
+def _get_bound_config() -> dict | None:
+    local_cfg = getattr(_tls, "bound_config", None)
+    if isinstance(local_cfg, dict):
+        return local_cfg
+    return _BOUND_CONFIG
 
 
 def settings_from_config():
@@ -421,7 +473,7 @@ def settings_from_config():
     就把注册主流程带崩。CPA 流程与注册流程共用这一份读取逻辑。
     """
     try:
-        cfg = _BOUND_CONFIG
+        cfg = _get_bound_config()
         if not isinstance(cfg, dict):
             import app_config
             cfg = getattr(app_config, "config", None)
@@ -467,7 +519,7 @@ def auto_wait_sec(default=10.0):
 
 
 def solve_and_inject(page, client_key, log=None, api_base="", timeout_sec=None,
-                     http_post=None, url="", sitekey=""):
+                     http_post=None, url="", sitekey="", proxy=""):
     """一站式：检测 Turnstile → 提取 sitekey → 解题 → 注入。
 
     返回 dict：{"ok": bool, "reason": str, "token_len": int, "ua_matched": bool}
@@ -492,10 +544,21 @@ def solve_and_inject(page, client_key, log=None, api_base="", timeout_sec=None,
             page_url = str(getattr(page, "url", "") or "")
         except Exception:
             page_url = ""
+    session_proxy = str(proxy or "").strip()
+    if not session_proxy:
+        cfg = _get_bound_config()
+        if isinstance(cfg, dict):
+            for k in ("captcha_solver_proxy", "proxy"):
+                val = str(cfg.get(k) or "").strip()
+                if val and val.lower() not in ("direct", "none", "off", "0"):
+                    session_proxy = val
+                    break
+    if not session_proxy:
+        session_proxy = current_registration_proxy()
     try:
         client = YesCaptchaClient(client_key, api_base=api_base,
                                   http_post=http_post, log=logger, timeout_sec=timeout_sec)
-        solved = client.solve_turnstile(page_url, key, timeout_sec=timeout_sec)
+        solved = client.solve_turnstile(page_url, key, timeout_sec=timeout_sec, proxy=session_proxy)
     except CaptchaError as exc:
         return {"ok": False, "reason": str(exc)[:160], "token_len": 0, "ua_matched": False}
 
@@ -503,6 +566,7 @@ def solve_and_inject(page, client_key, log=None, api_base="", timeout_sec=None,
     ua_matched = True
     expected_ua = solved.get("user_agent") or ""
     if expected_ua:
+        actual = ""
         try:
             actual = str(page.run_js("return navigator.userAgent;") or "")
             ua_matched = actual.strip() == expected_ua.strip()
@@ -526,6 +590,15 @@ def solve_and_inject(page, client_key, log=None, api_base="", timeout_sec=None,
 
 def current_registration_proxy():
     """取当前线程正在使用的注册代理 URL，取不到返回空串。"""
+    try:
+        cfg = _get_bound_config()
+        if isinstance(cfg, dict):
+            for k in ("captcha_solver_proxy", "proxy"):
+                v = str(cfg.get(k) or "").strip()
+                if v and v.lower() not in ("direct", "none", "off", "0"):
+                    return v
+    except Exception:
+        pass
     try:
         import proxy_pool_v3
         url = proxy_pool_v3.current_proxy_url()
@@ -551,6 +624,8 @@ def solver_proxy_line(proxy_url):
         return ""
     if url.startswith("socks5h://"):
         return "socks5://" + url[len("socks5h://"):]
+    if url.startswith("socks4a://"):
+        return "socks4://" + url[len("socks4a://"):]
     return url
 
 
@@ -563,8 +638,8 @@ def sync_solver_proxy(log=None, path=""):
     让 solver 走同一个住宅代理后立刻成功。所以每次打码前必须同步代理。
 
     注意：solver 用的是 random.choice(proxies)，因此这里清空后只写一行，
-    保证它别无选择。多线程并发时该文件会互相覆盖，故仅在单线程注册下
-    可靠。
+    保证它别无选择。多线程并发时优先通过请求参数 proxy 传给 solver，
+    这里对文件写入加锁以保持向后兼容。
     """
     logger = log or (lambda _m: None)
     target = str(path or "").strip() or default_proxies_file()
@@ -572,9 +647,10 @@ def sync_solver_proxy(log=None, path=""):
     if not proxy:
         # 直连场景：清空文件，避免 solver 继续用上一批的旧代理。
         try:
-            if target and os.path.exists(target):
-                with open(target, "w", encoding="utf-8") as handle:
-                    handle.write("")
+            with _PROXIES_FILE_LOCK:
+                if target and os.path.exists(target):
+                    with open(target, "w", encoding="utf-8") as handle:
+                        handle.write("")
         except Exception:
             pass
         return ""
@@ -583,14 +659,15 @@ def sync_solver_proxy(log=None, path=""):
     if not target:
         return line
     try:
-        directory = os.path.dirname(target)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = target + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        os.replace(tmp, target)
-        logger("已同步打码代理: %s" % line)
+        with _PROXIES_FILE_LOCK:
+            directory = os.path.dirname(target)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            tmp = f"{target}.{threading.get_ident()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            os.replace(tmp, target)
+        logger("已同步打码代理: %s" % _mask_proxy(line))
     except Exception as exc:
         logger("同步打码代理失败（不影响注册）: %s" % str(exc)[:80])
     return line

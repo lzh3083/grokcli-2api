@@ -9,7 +9,9 @@
 * ``chromium`` —— 旧的 DrissionPage 实现，保留用于回退排查。
 """
 import os
+import threading
 import urllib.parse
+from typing import Any
 
 from camoufox_compat import CamoufoxOptions, parse_proxy
 from curl_cffi import requests
@@ -25,8 +27,19 @@ from proxy_pool import (
     safe_proxy_error_text,
 )
 
-_config = {}
-_extension_path = ""
+_RUNTIME_TLS = threading.local()
+_DEFAULT_CONFIG_LOCK = threading.Lock()
+_DEFAULT_CONFIG_SNAPSHOT: dict[str, Any] = {}
+_DEFAULT_EXTENSION_PATH = ""
+
+
+def _get_config() -> dict[str, Any]:
+    local_cfg = getattr(_RUNTIME_TLS, "config", None)
+    if not isinstance(local_cfg, dict):
+        with _DEFAULT_CONFIG_LOCK:
+            local_cfg = dict(_DEFAULT_CONFIG_SNAPSHOT)
+        _RUNTIME_TLS.config = local_cfg
+    return local_cfg
 
 
 def _legacy_extension_path():
@@ -37,7 +50,7 @@ def _resolve_extension_path(explicit=None):
     if explicit is not None:
         candidate = str(explicit or "").strip()
         return candidate if candidate and os.path.isdir(candidate) else ""
-    configured = str(_extension_path or "").strip()
+    configured = str(getattr(_RUNTIME_TLS, "extension_path", "") or _DEFAULT_EXTENSION_PATH or "").strip()
     if configured and os.path.isdir(configured):
         return configured
     legacy = _legacy_extension_path()
@@ -45,19 +58,27 @@ def _resolve_extension_path(explicit=None):
 
 
 def configure_runtime(config_ref, extension_path=""):
-    global _config, _extension_path
-    _config = config_ref
-    _extension_path = str(extension_path or "")
+    global _DEFAULT_CONFIG_SNAPSHOT, _DEFAULT_EXTENSION_PATH
+    cfg = dict(config_ref) if isinstance(config_ref, dict) else {}
+    ext = str(extension_path or "")
+    _RUNTIME_TLS.config = cfg
+    _RUNTIME_TLS.extension_path = ext
+    with _DEFAULT_CONFIG_LOCK:
+        if not _DEFAULT_CONFIG_SNAPSHOT and cfg:
+            _DEFAULT_CONFIG_SNAPSHOT = dict(cfg)
+        if not _DEFAULT_EXTENSION_PATH and ext:
+            _DEFAULT_EXTENSION_PATH = ext
 
 
 def get_configured_proxy():
     lease = current_proxy_lease()
     if lease is not None:
         return str(lease.proxy_url or "").strip()
-    mode = str(_config.get("proxy_mode", "auto") or "auto").strip().lower()
+    cfg = _get_config()
+    mode = str(cfg.get("proxy_mode", "auto") or "auto").strip().lower()
     if mode == "direct" or mode in ("single", "pool"):
         return ""
-    return str(_config.get("proxy", "") or "").strip()
+    return str(cfg.get("proxy", "") or "").strip()
 
 
 def get_proxies():
@@ -240,7 +261,7 @@ def browser_engine():
     raw = str(os.environ.get("GROK2API_BROWSER_ENGINE") or "").strip().lower()
     if not raw:
         try:
-            raw = str((_config or {}).get("browser_engine") or "").strip().lower()
+            raw = str((_get_config() or {}).get("browser_engine") or "").strip().lower()
         except Exception:
             raw = ""
     return "chromium" if raw in ("chromium", "chrome", "drission") else "camoufox"
@@ -257,15 +278,16 @@ def _configure_camoufox_options(options, browser_proxy="", extension_path=None):
     Sec-CH-UA 头。
     """
     # x.ai 的 Cloudflare 对 headless 指纹判定极严，始终用窗口化 + Xvfb。
+    cfg = _get_config()
     display = str(os.environ.get("DISPLAY") or "").strip()
-    force_headless = str((_config or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
+    force_headless = str((cfg or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
     if force_headless or not display:
         options.headless(True)
     apply_browser_proxy_option(options, browser_proxy)
     # 时区仍需与代理出口地区对齐：Camoufox 支持显式指定，交给它而不是改进程 TZ。
     try:
         import us_consistency
-        us_consistency.configure(_config)
+        us_consistency.configure(cfg)
         if us_consistency.enabled():
             timezone = str(us_consistency.timezone_name() or "").strip()
             locale = str(us_consistency.locale_name() or "").strip()
@@ -295,8 +317,9 @@ def create_browser_options(browser_proxy="", extension_path=None):
     # be reached over CDP without one. A root-owned Chromium always needs
     # --no-sandbox. browser_path comes from
     # browser_register_adapter._detect_chromium_path().
+    cfg = _get_config()
     display = str(os.environ.get("DISPLAY") or "").strip()
-    force_headless = str((_config or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
+    force_headless = str((cfg or {}).get("cpa_headless") or "").strip().lower() in ("1", "true", "yes")
     if force_headless or not display:
         options.headless(True)
     options.set_argument("--no-sandbox")
@@ -305,13 +328,13 @@ def create_browser_options(browser_proxy="", extension_path=None):
     # Sec-CH-UA-* headers, so the User-Agent must claim Windows too. Chromium's
     # own UA says "Linux", which contradicts those overrides and is enough for
     # Cloudflare to reject the Turnstile token.
-    user_agent = str((_config or {}).get("user_agent") or "").strip()
+    user_agent = str((cfg or {}).get("user_agent") or "").strip()
     if user_agent:
         try:
             options.set_argument("--user-agent=%s" % user_agent)
         except TypeError:
             options.set_argument("--user-agent", user_agent)
-    browser_path = str((_config or {}).get("browser_path") or "").strip()
+    browser_path = str((cfg or {}).get("browser_path") or "").strip()
     if browser_path:
         options.set_browser_path(browser_path)
     apply_browser_proxy_option(options, browser_proxy)
@@ -322,7 +345,7 @@ def create_browser_options(browser_proxy="", extension_path=None):
     # 时区=UTC、platform=Linux 这类自相矛盾特征。失败不影响主流程。
     try:
         import us_consistency
-        us_consistency.configure(_config)
+        us_consistency.configure(cfg)
         us_consistency.apply_process_timezone()
         us_consistency.apply_browser_options(options)
     except Exception:

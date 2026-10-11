@@ -24,6 +24,7 @@ type Leader struct {
 	leaderID string
 	started  bool
 	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewLeader(client *Client, mode string, workers int, ttl, renew time.Duration) *Leader {
@@ -180,11 +181,14 @@ func (l *Leader) ensureWatch() {
 		return
 	}
 	l.started = true
+	l.stop = make(chan struct{})
+	l.stopOnce = sync.Once{}
+	stopCh := l.stop
 	l.mu.Unlock()
-	go l.watchLoop()
+	go l.watchLoop(stopCh)
 }
 
-func (l *Leader) watchLoop() {
+func (l *Leader) watchLoop(stopCh <-chan struct{}) {
 	interval := l.Renew
 	if interval > l.TTL/2 {
 		interval = l.TTL / 2
@@ -196,7 +200,7 @@ func (l *Leader) watchLoop() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-l.stop:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -233,11 +237,14 @@ func (l *Leader) watchLoop() {
 }
 
 func (l *Leader) Release(ctx context.Context) {
-	select {
-	case <-l.stop:
-	default:
-		close(l.stop)
-	}
+	l.mu.Lock()
+	l.stopOnce.Do(func() {
+		if l.stop != nil {
+			close(l.stop)
+		}
+	})
+	l.started = false
+	l.mu.Unlock()
 	force := l.forceMode()
 	if force != nil && *force {
 		l.setLeader(false, "")
@@ -251,9 +258,6 @@ func (l *Leader) Release(ctx context.Context) {
 		_, _ = l.Client.ReleaseLock(ctx, l.Client.LeaderLockKey(), l.WorkerID)
 	}
 	l.setLeader(false, "")
-	l.mu.Lock()
-	l.started = false
-	l.mu.Unlock()
 }
 
 func firstNonEmpty(values ...string) string {

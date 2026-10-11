@@ -246,6 +246,8 @@ func buildCLIProxyRecord(entry map[string]any, aid string) map[string]any {
 	return rec
 }
 
+var integrationHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // TestCLIProxy does a lightweight management auth-files list.
 func TestCLIProxy(ctx context.Context, cfg map[string]any) map[string]any {
 	base := strings.TrimRight(stringField(cfg, "base_url"), "/")
@@ -259,7 +261,7 @@ func TestCLIProxy(ctx context.Context, cfg map[string]any) map[string]any {
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("X-Management-Key", key)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := integrationHTTPClient.Do(req)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
@@ -717,7 +719,7 @@ func sub2Login(ctx context.Context, base, email, password string) (string, error
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "grokcli-2api-sub2api-push/1.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := integrationHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -742,7 +744,7 @@ func sub2ListGroups(ctx context.Context, base, token string) ([]map[string]any, 
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "grokcli-2api-sub2api-push/1.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := integrationHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -800,7 +802,7 @@ func sub2CreateGroup(ctx context.Context, base, token, name, platform string) (m
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "grokcli-2api-sub2api-push/1.0")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := integrationHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

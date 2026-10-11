@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -1356,11 +1357,16 @@ func (a *ChatToolStreamAssembler) HasUnacked() bool {
 	return len(a.pendingAcks) > 0
 }
 
+const maxToolCallIndex = 64
+
 func (a *ChatToolStreamAssembler) mergeToolCalls(calls []map[string]any) {
 	for _, incoming := range calls {
 		idx := len(a.toolCalls)
-		if rawIndex, ok := numberToInt64(incoming["index"]); ok && rawIndex >= 0 {
+		if rawIndex, ok := numberToInt64(incoming["index"]); ok && rawIndex >= 0 && rawIndex <= maxToolCallIndex {
 			idx = int(rawIndex)
+		}
+		if idx > maxToolCallIndex {
+			continue
 		}
 		for len(a.toolCalls) <= idx {
 			a.toolCalls = append(a.toolCalls, map[string]any{"index": len(a.toolCalls)})
@@ -1497,8 +1503,11 @@ func (a *ChatToolStreamAssembler) baseChunk() map[string]any {
 func (c *chatCollector) mergeToolCalls(calls []map[string]any) {
 	for _, incoming := range calls {
 		idx := len(c.toolCalls)
-		if rawIndex, ok := numberToInt64(incoming["index"]); ok && rawIndex >= 0 {
+		if rawIndex, ok := numberToInt64(incoming["index"]); ok && rawIndex >= 0 && rawIndex <= maxToolCallIndex {
 			idx = int(rawIndex)
+		}
+		if idx > maxToolCallIndex {
+			continue
 		}
 		for len(c.toolCalls) <= idx {
 			c.toolCalls = append(c.toolCalls, map[string]any{"index": len(c.toolCalls)})
@@ -2137,6 +2146,13 @@ func ctxOrBackground(ctx context.Context) context.Context {
 func numberToInt64(value any) (int64, bool) {
 	switch v := value.(type) {
 	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, false
+		}
+		const maxSafeInt = 1<<53 - 1
+		if v < -maxSafeInt || v > maxSafeInt {
+			return 0, false
+		}
 		return int64(v), true
 	case json.Number:
 		n, err := v.Int64()
@@ -2174,6 +2190,8 @@ const emptyStreamHollowBudget = 8 * time.Second
 // emptyStreamPeekBudget is an alias kept for tests that time delays against the
 // short silence window (historical name).
 const emptyStreamPeekBudget = emptyStreamNoDataBudget
+
+const maxEmptyStreamPeekBytes = 2 << 20
 
 // guardStreamAgainstEmpty peeks upstream SSE until the first model payload or
 // stream end. Empty HTTP 200 bodies can then failover before the client envelope
@@ -2222,6 +2240,10 @@ func guardStreamAgainstEmpty(body io.ReadCloser) (io.ReadCloser, bool, error) {
 			if parseErr != nil {
 				// Malformed / keepalive — still counts as activity (not pure silence).
 				sawHollow = true
+				if buffered.Len() >= maxEmptyStreamPeekBytes {
+					sawModel = true
+					return errStopPeek
+				}
 				return nil
 			}
 			if strings.TrimSpace(delta.Content) != "" ||
@@ -2233,6 +2255,10 @@ func guardStreamAgainstEmpty(body io.ReadCloser) (io.ReadCloser, bool, error) {
 			}
 			// Empty delta, finish_reason-only, usage-only → hollow drip.
 			sawHollow = true
+			if buffered.Len() >= maxEmptyStreamPeekBytes {
+				sawModel = true
+				return errStopPeek
+			}
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopPeek) {
@@ -2372,6 +2398,10 @@ func confirmStreamNotEmpty(body io.ReadCloser) (io.ReadCloser, bool, error) {
 			delta, parseErr := parseChatDelta(event.Data)
 			if parseErr != nil {
 				sawHollow = true
+				if buffered.Len() >= maxEmptyStreamPeekBytes {
+					sawModel = true
+					return errStopPeek
+				}
 				return nil
 			}
 			if strings.TrimSpace(delta.Content) != "" ||
@@ -2382,6 +2412,10 @@ func confirmStreamNotEmpty(body io.ReadCloser) (io.ReadCloser, bool, error) {
 				return errStopPeek
 			}
 			sawHollow = true
+			if buffered.Len() >= maxEmptyStreamPeekBytes {
+				sawModel = true
+				return errStopPeek
+			}
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopPeek) {
@@ -2437,15 +2471,20 @@ var errStopPeek = errors.New("stop peek")
 type peekerReader struct {
 	p    *pumpedStream
 	stop <-chan struct{}
+	read int
 }
 
 func (r *peekerReader) Read(b []byte) (int, error) {
 	if r == nil || r.p == nil {
 		return 0, io.EOF
 	}
+	if r.read >= maxEmptyStreamPeekBytes {
+		return 0, errStopPeek
+	}
 	for {
 		// Fast path: data already buffered.
 		if n, err, ok := r.p.tryRead(b); ok {
+			r.read += n
 			return n, err
 		}
 		// Wait for data, close, or stop signal.
@@ -2453,6 +2492,7 @@ func (r *peekerReader) Read(b []byte) (int, error) {
 		case <-r.stop:
 			// Re-check buffer once more in case data arrived with stop.
 			if n, err, ok := r.p.tryRead(b); ok {
+				r.read += n
 				return n, err
 			}
 			return 0, errStopPeek
@@ -2486,6 +2526,16 @@ func newPumpedStream(src io.ReadCloser) *pumpedStream {
 func (p *pumpedStream) pump() {
 	tmp := make([]byte, 32*1024)
 	for {
+		p.mu.Lock()
+		for p.buf.Len() >= maxEmptyStreamPeekBytes*2 && !p.closed {
+			p.cond.Wait()
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return
+		}
+		p.mu.Unlock()
+
 		n, err := p.src.Read(tmp)
 		p.mu.Lock()
 		if n > 0 {
@@ -2517,6 +2567,7 @@ func (p *pumpedStream) tryRead(b []byte) (int, error, bool) {
 	defer p.mu.Unlock()
 	if p.buf.Len() > 0 {
 		n, err := p.buf.Read(b)
+		p.cond.Broadcast()
 		return n, err, true
 	}
 	if p.closed {
@@ -2538,7 +2589,9 @@ func (p *pumpedStream) Read(b []byte) (int, error) {
 		p.cond.Wait()
 	}
 	if p.buf.Len() > 0 {
-		return p.buf.Read(b)
+		n, err := p.buf.Read(b)
+		p.cond.Broadcast()
+		return n, err
 	}
 	if p.closed {
 		return 0, io.ErrClosedPipe

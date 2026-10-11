@@ -2,7 +2,7 @@
 # Local development for the Go main process.
 # Usage:
 #   ./dev.sh
-#   GROK2API_PORT=40081 ./dev.sh
+#   GROK2API_PORT=3000 ./dev.sh
 #
 # Requires Redis + PostgreSQL (same as production hybrid mode).
 # Example with docker only for stores:
@@ -13,14 +13,49 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+load_dotenv() {
+  local env_file="${1:-.env}"
+  [[ -f "${env_file}" ]] || return 0
+  local line key val
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    if [[ "${line}" == export[[:space:]]* ]]; then
+      line="${line#export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    [[ "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || continue
+    val="${val#"${val%%[![:space:]]*}"}"
+    if [[ "${val}" =~ ^\"(([^\"\\]|\\.)*)\"[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+      val="${val//\\\"/\"}"
+      val="${val//\\\\/\\}"
+    elif [[ "${val}" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      if [[ "${val}" == \#* ]]; then
+        val=""
+      else
+        val="${val%%[[:space:]]#*}"
+        val="${val%"${val##*[![:space:]]}"}"
+      fi
+    fi
+    export "${key}=${val}"
+  done < "${env_file}"
+}
+
 if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
+  load_dotenv .env
 fi
 
 export GROK2API_RUNTIME=go
+export GROK2API_REQUIRE_API_KEY="${GROK2API_REQUIRE_API_KEY:-1}"
 export GROK2API_WORKERS="${GROK2API_WORKERS:-1}"
 export GROK2API_OPEN_BROWSER="${GROK2API_OPEN_BROWSER:-0}"
 export GROK2API_HOST="${GROK2API_HOST:-0.0.0.0}"

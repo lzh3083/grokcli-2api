@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -15,8 +16,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 _NOVPROXY_LOCK = threading.Lock()
+_PROXIES_FILE_LOCK = threading.Lock()
 _NOVPROXY_BAD_UNTIL: dict[str, float] = {}
 _NOVPROXY_IDX = 0
+
+
+def _mask_proxy(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    s = str(proxy_url).strip()
+    return re.sub(r"://([^/@:]+):([^/@]+)@", r"://***:***@", s)
 
 
 # Ensure browser_register package is in sys.path
@@ -245,7 +254,7 @@ def run_browser_registration(
                     selected_node = valid_nodes[0]
 
                 active_proxy = selected_node if "://" in selected_node else f"socks5h://{selected_node}"
-                _log_cb(f"[+] 成功分配 NovProxy 住宅节点 ({region}): {active_proxy}")
+                _log_cb(f"[+] 成功分配 NovProxy 住宅节点 ({region}): {_mask_proxy(active_proxy)}")
                 cfg["proxy_pool_preflight_enabled"] = False
         except Exception as n_exc:
             _log_cb(f"[!] NovProxy 动态提取失败: {n_exc}")
@@ -328,12 +337,15 @@ def run_browser_registration(
                 solver_proxy_line = "socks5://" + solver_proxy_line[len("socks5h://"):]
             elif solver_proxy_line.startswith("socks4a://"):
                 solver_proxy_line = "socks4://" + solver_proxy_line[len("socks4a://"):]
-        Path(solver_proxies_file).parent.mkdir(parents=True, exist_ok=True)
-        Path(solver_proxies_file).write_text(
-            (solver_proxy_line + "\n") if solver_proxy_line else "", encoding="utf-8"
-        )
+        cfg["captcha_solver_proxy"] = solver_proxy_line
+        captcha_solver.bind_runtime(cfg)
+        with _PROXIES_FILE_LOCK:
+            Path(solver_proxies_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(solver_proxies_file).write_text(
+                (solver_proxy_line + "\n") if solver_proxy_line else "", encoding="utf-8"
+            )
         print(
-            f"[{sid}] solver proxy synced -> {solver_proxies_file} line={solver_proxy_line!r}",
+            f"[{sid}] solver proxy synced -> {solver_proxies_file} line={_mask_proxy(solver_proxy_line)!r}",
             flush=True,
         )
     except Exception as exc:

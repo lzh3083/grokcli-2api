@@ -3,6 +3,9 @@ package redis
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -14,13 +17,17 @@ import (
 	"time"
 )
 
-const adminSessionTTLSeconds = 7 * 24 * 3600
+const (
+	adminSessionTTLSeconds = 7 * 24 * 3600
+	adminSessionMaxAge     = 30 * 24 * time.Hour
+)
 
 const (
-	defaultPoolSize    = 32
-	defaultDialTimeout = 800 * time.Millisecond
-	defaultIdleTimeout = 45 * time.Second
-	defaultCmdTimeout  = 2 * time.Second
+	defaultPoolSize     = 32
+	defaultMaxOpenConns = 128
+	defaultDialTimeout  = 800 * time.Millisecond
+	defaultIdleTimeout  = 45 * time.Second
+	defaultCmdTimeout   = 2 * time.Second
 )
 
 type Client struct {
@@ -37,10 +44,15 @@ type connPool struct {
 	db       string
 
 	maxIdle int
+	maxOpen int
+	sem     chan struct{}
 	idle    chan *pooledConn
 	dialer  net.Dialer
 
-	// closed is set on process exit paths (best-effort); pool still works if unset.
+	mu     sync.Mutex
+	active map[*pooledConn]struct{}
+
+	// closed is set on Close() / process exit paths.
 	closed atomic.Bool
 }
 
@@ -66,6 +78,54 @@ func (c *Client) Ping(ctx context.Context) error {
 	return err
 }
 
+func (c *Client) Close() error {
+	if c == nil || c.pool == nil {
+		return nil
+	}
+	return c.pool.Close()
+}
+
+func hashAdminSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func adminSessionExceedsMaxAge(raw string, now time.Time) bool {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return false
+	}
+	var ts float64
+	for _, field := range []string{"ts", "created_at"} {
+		if v, ok := payload[field]; ok && v != nil {
+			switch x := v.(type) {
+			case float64:
+				ts = x
+			case float32:
+				ts = float64(x)
+			case int64:
+				ts = float64(x)
+			case int:
+				ts = float64(x)
+			case json.Number:
+				ts, _ = x.Float64()
+			case string:
+				ts, _ = strconv.ParseFloat(strings.TrimSpace(x), 64)
+			}
+			if ts > 0 {
+				break
+			}
+		}
+	}
+	if ts <= 0 {
+		return false
+	}
+	if ts > 1e12 {
+		ts = ts / 1000
+	}
+	return now.Sub(time.Unix(int64(ts), 0)) > adminSessionMaxAge
+}
+
 func (c *Client) VerifyAdminSession(token string) bool {
 	token = strings.TrimSpace(token)
 	if token == "" || !c.Enabled() {
@@ -73,17 +133,35 @@ func (c *Client) VerifyAdminSession(token string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	key := c.key("admin", "sess", token)
-	value, err := c.command(ctx, "GET", key)
+	hashed := hashAdminSessionToken(token)
+	hashedKey := c.key("admin", "sess", hashed)
+	legacyKey := c.key("admin", "sess", token)
+	matchedLegacy := false
+	value, err := c.command(ctx, "GET", hashedKey)
 	if err != nil || value == "" {
+		matchedLegacy = true
+		value, err = c.command(ctx, "GET", legacyKey)
+		if err != nil || value == "" {
+			return false
+		}
+	}
+	if adminSessionExceedsMaxAge(value, time.Now()) {
+		_, _ = c.command(ctx, "DEL", hashedKey, legacyKey)
 		return false
 	}
-	_, _ = c.command(ctx, "EXPIRE", key, strconv.Itoa(adminSessionTTLSeconds))
+	if matchedLegacy {
+		_, _ = c.command(ctx, "SET", hashedKey, value, "EX", strconv.Itoa(adminSessionTTLSeconds))
+		if legacyKey != hashedKey {
+			_, _ = c.command(ctx, "DEL", legacyKey)
+		}
+		return true
+	}
+	_, _ = c.command(ctx, "EXPIRE", hashedKey, strconv.Itoa(adminSessionTTLSeconds))
 	return true
 }
 
-// CreateAdminSession stores a Python-compatible admin session payload under
-// g2a:admin:sess:{token} with a 7-day TTL.
+// CreateAdminSession stores an admin session payload under
+// g2a:admin:sess:{sha256(token)} with a 7-day TTL.
 func (c *Client) CreateAdminSession(token string) error {
 	token = strings.TrimSpace(token)
 	if token == "" || !c.Enabled() {
@@ -92,7 +170,8 @@ func (c *Client) CreateAdminSession(token string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	payload := fmt.Sprintf(`{"ts":%d}`, time.Now().Unix())
-	_, err := c.command(ctx, "SET", c.key("admin", "sess", token), payload, "EX", strconv.Itoa(adminSessionTTLSeconds))
+	hashedKey := c.key("admin", "sess", hashAdminSessionToken(token))
+	_, err := c.command(ctx, "SET", hashedKey, payload, "EX", strconv.Itoa(adminSessionTTLSeconds))
 	return err
 }
 
@@ -103,7 +182,9 @@ func (c *Client) DeleteAdminSession(token string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := c.command(ctx, "DEL", c.key("admin", "sess", token))
+	hashedKey := c.key("admin", "sess", hashAdminSessionToken(token))
+	legacyKey := c.key("admin", "sess", token)
+	_, err := c.command(ctx, "DEL", hashedKey, legacyKey)
 	return err
 }
 
@@ -212,18 +293,7 @@ func (c *Client) CompareAndDelete(ctx context.Context, key, expected string) (bo
 	script := "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 	raw, err := c.command(ctx, "EVAL", script, "1", key, expected)
 	if err != nil {
-		// fallback
-		cur, gerr := c.Get(ctx, key)
-		if gerr != nil {
-			return false, gerr
-		}
-		if cur == expected {
-			if err := c.Del(ctx, key); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
+		return false, err
 	}
 	n, _ := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	return n > 0, nil
@@ -237,17 +307,7 @@ func (c *Client) RenewIfOwner(ctx context.Context, key, expected string, ttlSeco
 	script := "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
 	raw, err := c.command(ctx, "EVAL", script, "1", key, expected, strconv.Itoa(ttlSeconds))
 	if err != nil {
-		cur, gerr := c.Get(ctx, key)
-		if gerr != nil {
-			return false, gerr
-		}
-		if cur == expected {
-			if err := c.Expire(ctx, key, ttlSeconds); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
+		return false, err
 	}
 	n, _ := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	return n > 0, nil
@@ -425,7 +485,10 @@ func (c *Client) ensurePool() (*connPool, error) {
 			password: password,
 			db:       db,
 			maxIdle:  defaultPoolSize,
+			maxOpen:  defaultMaxOpenConns,
+			sem:      make(chan struct{}, defaultMaxOpenConns),
 			idle:     make(chan *pooledConn, defaultPoolSize),
+			active:   make(map[*pooledConn]struct{}),
 			dialer: net.Dialer{
 				Timeout:   defaultDialTimeout,
 				KeepAlive: 30 * time.Second,
@@ -441,18 +504,59 @@ func (c *Client) ensurePool() (*connPool, error) {
 	return c.pool, nil
 }
 
+func (p *connPool) acquireSem(ctx context.Context) error {
+	if p == nil || p.sem == nil {
+		return nil
+	}
+	if ctx != nil {
+		if _, ok := ctx.Deadline(); ok {
+			select {
+			case p.sem <- struct{}{}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	timer := time.NewTimer(defaultDialTimeout)
+	defer timer.Stop()
+	select {
+	case p.sem <- struct{}{}:
+		return nil
+	case <-timer.C:
+		return errors.New("redis connection pool exhausted")
+	}
+}
+
+func (p *connPool) releaseSem() {
+	if p == nil || p.sem == nil {
+		return
+	}
+	select {
+	case <-p.sem:
+	default:
+	}
+}
+
 func (p *connPool) borrow(ctx context.Context) (*pooledConn, error) {
-	if p == nil {
+	if p == nil || p.closed.Load() {
 		return nil, errors.New("redis pool unavailable")
 	}
+	if err := p.acquireSem(ctx); err != nil {
+		return nil, err
+	}
 	for {
+		if p.closed.Load() {
+			p.releaseSem()
+			return nil, errors.New("redis pool closed")
+		}
 		select {
 		case pc := <-p.idle:
 			if pc == nil {
 				continue
 			}
 			if time.Since(pc.lastUsed) > defaultIdleTimeout {
-				_ = pc.Close()
+				p.closeConn(pc)
 				continue
 			}
 			// No PING on borrow: extra RTT would defeat TTFT pooling gains.
@@ -460,7 +564,12 @@ func (p *connPool) borrow(ctx context.Context) (*pooledConn, error) {
 			_ = pc.SetDeadline(time.Time{})
 			return pc, nil
 		default:
-			return p.dial(ctx)
+			pc, err := p.dial(ctx)
+			if err != nil {
+				p.releaseSem()
+				return nil, err
+			}
+			return pc, nil
 		}
 	}
 }
@@ -494,15 +603,42 @@ func (p *connPool) dial(ctx context.Context) (*pooledConn, error) {
 		}
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return &pooledConn{Conn: conn, reader: reader, lastUsed: time.Now()}, nil
+	pc := &pooledConn{Conn: conn, reader: reader, lastUsed: time.Now()}
+	p.mu.Lock()
+	if p.closed.Load() {
+		p.mu.Unlock()
+		_ = conn.Close()
+		return nil, errors.New("redis pool closed")
+	}
+	if p.active == nil {
+		p.active = make(map[*pooledConn]struct{})
+	}
+	p.active[pc] = struct{}{}
+	p.mu.Unlock()
+	return pc, nil
+}
+
+func (p *connPool) closeConn(pc *pooledConn) {
+	if pc == nil {
+		return
+	}
+	if p != nil {
+		p.mu.Lock()
+		delete(p.active, pc)
+		p.mu.Unlock()
+	}
+	if pc.Conn != nil {
+		_ = pc.Conn.Close()
+	}
 }
 
 func (p *connPool) put(pc *pooledConn) {
+	defer p.releaseSem()
 	if pc == nil {
 		return
 	}
 	if p == nil || p.closed.Load() {
-		_ = pc.Close()
+		p.closeConn(pc)
 		return
 	}
 	_ = pc.SetDeadline(time.Time{})
@@ -513,15 +649,50 @@ func (p *connPool) put(pc *pooledConn) {
 	}
 	select {
 	case p.idle <- pc:
+		if p.closed.Load() {
+			select {
+			case dead := <-p.idle:
+				p.closeConn(dead)
+			default:
+			}
+		}
 	default:
-		_ = pc.Close()
+		p.closeConn(pc)
 	}
 }
 
 func (p *connPool) discard(pc *pooledConn) {
+	defer p.releaseSem()
 	if pc != nil {
-		_ = pc.Close()
+		p.closeConn(pc)
 	}
+}
+
+func (p *connPool) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.closed.Store(true)
+	for {
+		select {
+		case pc := <-p.idle:
+			if pc != nil {
+				p.closeConn(pc)
+			}
+		default:
+			goto closeActive
+		}
+	}
+closeActive:
+	p.mu.Lock()
+	for pc := range p.active {
+		if pc != nil && pc.Conn != nil {
+			_ = pc.Conn.Close()
+		}
+		delete(p.active, pc)
+	}
+	p.mu.Unlock()
+	return nil
 }
 
 func deadlineFrom(ctx context.Context, fallback time.Duration) time.Time {

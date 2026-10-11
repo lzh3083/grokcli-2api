@@ -70,4 +70,32 @@ func TestModelBlockedObjectUntil(t *testing.T) {
 	if modelBlocked(blocked, "grok-3", now) {
 		t.Fatal("unrelated model should not block")
 	}
+	// permanent numeric marker in object until (0 < until <= 1577836800)
+	blocked["grok-4.5"] = map[string]any{"until": float64(1)}
+	if !modelBlocked(blocked, "grok-4.5", now) {
+		t.Fatal("permanent numeric marker in object until should block")
+	}
+}
+
+func TestRandomModeShufflesSameWeight(t *testing.T) {
+	now := time.Unix(1000, 0)
+	candidates := []Candidate{
+		{ID: "a1", Token: "t", Enabled: true, Weight: 1},
+		{ID: "a2", Token: "t", Enabled: true, Weight: 1},
+		{ID: "a3", Token: "t", Enabled: true, Weight: 1},
+		{ID: "a4", Token: "t", Enabled: true, Weight: 1},
+		{ID: "a5", Token: "t", Enabled: true, Weight: 1},
+		{ID: "heavy", Token: "t", Enabled: true, Weight: 5},
+	}
+	seenSecond := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		ch := Chain(candidates, "grok", "random", now, 6)
+		if ch[0].ID != "heavy" {
+			t.Fatalf("highest weight should still rank first, got %s", ch[0].ID)
+		}
+		seenSecond[ch[1].ID] = true
+	}
+	if len(seenSecond) < 2 {
+		t.Fatalf("expected random shuffle among equal weights, got %v", seenSecond)
+	}
 }

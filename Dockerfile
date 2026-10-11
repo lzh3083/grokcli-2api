@@ -60,16 +60,14 @@ WORKDIR /app
 # Static docker CLI for in-container hot-update (needs docker.sock mount at runtime).
 ARG DOCKER_CLI_VERSION=27.5.1
 ARG TARGETARCH
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
         ca-certificates \
         chromium \
         curl \
         fonts-liberation \
         fonts-noto-color-emoji \
-        g++ \
-        gcc \
         libasound2 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
@@ -93,37 +91,51 @@ RUN apt-get update \
         libxshmfence1 \
         libxss1 \
         libxtst6 \
-        libzstd-dev \
-        python3-dev \
         tzdata \
         xvfb \
-    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo Asia/Shanghai > /etc/timezone \
-    && arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
-    && case "$arch" in \
-         amd64|x86_64) darch=x86_64 ;; \
-         arm64|aarch64) darch=aarch64 ;; \
-         *) darch=x86_64 ;; \
-       esac \
-    && curl -fsSL "https://download.docker.com/linux/static/stable/${darch}/docker-${DOCKER_CLI_VERSION}.tgz" \
-         | tar -xz -C /tmp \
-    && mv /tmp/docker/docker /usr/local/bin/docker \
-    && chmod +x /usr/local/bin/docker \
-    && rm -rf /tmp/docker \
-    && docker --version \
-    && rm -rf /var/lib/apt/lists/*
+    ; \
+    ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime; \
+    echo Asia/Shanghai > /etc/timezone; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64|x86_64) darch=x86_64 ;; \
+      arm64|aarch64) darch=aarch64 ;; \
+      *) echo "ERROR: unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fL --retry 3 -sS "https://download.docker.com/linux/static/stable/${darch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    mv /tmp/docker/docker /usr/local/bin/docker; \
+    chmod +x /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 COPY requirements.txt /app/requirements.txt
 COPY requirements-store.txt /app/requirements-store.txt
 COPY turnstile-solver/requirements.txt /app/turnstile-solver-requirements.txt
-RUN python -m pip install --no-cache-dir -U pip setuptools wheel \
-    && python -m pip install --no-cache-dir -r /app/requirements.txt \
-    && python -m pip install --no-cache-dir -r /app/requirements-store.txt \
-    && python -m pip install --no-cache-dir -r /app/turnstile-solver-requirements.txt
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        gcc \
+        libzstd-dev \
+        python3-dev \
+    ; \
+    python -m pip install --no-cache-dir -U pip setuptools wheel; \
+    python -m pip install --no-cache-dir -r /app/requirements.txt; \
+    python -m pip install --no-cache-dir -r /app/requirements-store.txt; \
+    python -m pip install --no-cache-dir -r /app/turnstile-solver-requirements.txt; \
+    apt-get purge -y --auto-remove build-essential g++ gcc libzstd-dev python3-dev; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /root/.cache /tmp/* /var/tmp/*
 
 # Prefetch browser binaries used by inline solver
 RUN python -m camoufox fetch \
-    && python -m patchright install chromium || true
+    && (python -m patchright install chromium || true) \
+    && rm -rf /root/.cache/pip /tmp/* /var/tmp/*
 
 COPY . /app
 COPY --from=go-builder /out/grok2api /app/bin/grok2api

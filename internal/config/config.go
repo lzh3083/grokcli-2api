@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -210,7 +211,7 @@ func Load() (Config, error) {
 		GoOwnershipMode:                 ownershipMode,
 		RegistrationMode:                registrationMode,
 		RegistrationServiceURL:          strings.TrimRight(envString("GROK2API_REGISTRATION_SERVICE_URL", ""), "/"),
-		RegistrationToken:               envString("GROK2API_REGISTRATION_TOKEN", ""),
+		RegistrationToken:               loadRegistrationToken(),
 		StaticDir:                       envString("GROK2API_STATIC_DIR", defaultStaticDir),
 		SSEKeepalive:                    keepalive,
 		RequestTimeout:                  timeout,
@@ -238,6 +239,22 @@ func envString(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func loadRegistrationToken() string {
+	if tok := strings.TrimSpace(os.Getenv("GROK2API_REGISTRATION_TOKEN")); tok != "" {
+		return tok
+	}
+	dataDir := strings.TrimSpace(os.Getenv("GROK2API_DATA_DIR"))
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	if raw, err := os.ReadFile(filepath.Join(dataDir, ".registration_token")); err == nil {
+		if tok := strings.TrimSpace(string(raw)); tok != "" {
+			return tok
+		}
+	}
+	return ""
 }
 
 func envAlias(names []string, fallback string) string {

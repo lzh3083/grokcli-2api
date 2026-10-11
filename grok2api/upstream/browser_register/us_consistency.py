@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.request
 
@@ -66,7 +67,7 @@ def _chrome_version_from_ua() -> str:
     """
     ua = ""
     try:
-        ua = str((_config or {}).get("user_agent") or "")
+        ua = str((_get_config() or {}).get("user_agent") or "")
     except Exception:
         ua = ""
     if not ua:
@@ -86,7 +87,26 @@ def _chrome_version_from_ua() -> str:
 
 _CH_UA_BRANDS = '"Not(A:Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"'
 
-_config: dict = {}
+_TLS = threading.local()
+_tls = _TLS
+_DEFAULT_CONFIG_LOCK = threading.Lock()
+_DEFAULT_CONFIG_SNAPSHOT: dict = {}
+
+
+def _get_config() -> dict:
+    local_cfg = getattr(_TLS, "config", None)
+    if not isinstance(local_cfg, dict):
+        with _DEFAULT_CONFIG_LOCK:
+            local_cfg = dict(_DEFAULT_CONFIG_SNAPSHOT)
+        _TLS.config = local_cfg
+    return local_cfg
+
+
+def _get_accept_language() -> str:
+    lang = getattr(_TLS, "accept_language", "") or getattr(_TLS, "accept_lang", "")
+    if not lang:
+        lang = _get_config().get("us_consistency_accept_language") or ""
+    return str(lang).strip() or DEFAULT_ACCEPT_LANGUAGE
 
 # 浏览器路径探测顺序。容器/服务器上 DrissionPage 默认找不到 Chrome，
 # 需要显式指定；这里做成"探测到就用"，避免把路径硬编码进配置文件。
@@ -137,7 +157,7 @@ def detect_browser_path() -> str:
 
     优先使用配置项 browser_path；其次读环境变量；最后按候选列表探测。
     """
-    configured = str(_config.get("browser_path") or "").strip()
+    configured = str(_get_config().get("browser_path") or "").strip()
     if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
         return configured
     from_env = _candidate_from_env()
@@ -150,9 +170,13 @@ def detect_browser_path() -> str:
 
 
 def configure(config_ref) -> None:
-    """由 app_config 注入配置。"""
-    global _config
-    _config = config_ref if isinstance(config_ref, dict) else {}
+    """由 app_config 或会话适配器注入配置（完全线程本地隔离）。"""
+    global _DEFAULT_CONFIG_SNAPSHOT
+    cfg = dict(config_ref) if isinstance(config_ref, dict) else {}
+    _TLS.config = cfg
+    with _DEFAULT_CONFIG_LOCK:
+        if not _DEFAULT_CONFIG_SNAPSHOT and cfg:
+            _DEFAULT_CONFIG_SNAPSHOT = dict(cfg)
 
 
 # 美国各州 → 时区。用于按代理真实出口自动对齐时区。
@@ -220,7 +244,9 @@ def apply_region_timezone(region) -> str:
     zone = timezone_for_region(region)
     if not zone:
         return ""
-    _config["us_consistency_timezone"] = zone
+    _TLS.timezone = zone
+    local_cfg = _get_config()
+    local_cfg["us_consistency_timezone"] = zone
     apply_process_timezone()
     return zone
 
@@ -279,48 +305,46 @@ def align_timezone_with_proxy(proxy_url="", expect_country="") -> str:
         zone = _COUNTRY_PRESETS[country]["timezone"]
 
     if zone:
-        _config["us_consistency_timezone"] = zone
-        # 自适应更新 locale 与 accept_language
+        _TLS.timezone = zone
+        local_cfg = _get_config()
+        local_cfg["us_consistency_timezone"] = zone
+        # 自适应更新 locale 与 accept_language（仅写入线程本地状态，不覆盖全局常量或共享字典）
         if country in _COUNTRY_PRESETS:
             preset = _COUNTRY_PRESETS[country]
-            _config["us_consistency_locale"] = preset["locale"]
-            globals()["DEFAULT_ACCEPT_LANGUAGE"] = preset["accept_lang"]
-        _config["_detected_country"] = country
-        _config["_detected_city"] = info.get("city")
+            _TLS.locale = preset["locale"]
+            _TLS.accept_language = preset["accept_lang"]
+            _TLS.accept_lang = preset["accept_lang"]
+            local_cfg["us_consistency_locale"] = preset["locale"]
+            local_cfg["us_consistency_accept_language"] = preset["accept_lang"]
+        _TLS.detected_country = country
+        _TLS.detected_city = info.get("city")
+        local_cfg["_detected_country"] = country
+        local_cfg["_detected_city"] = info.get("city")
         apply_process_timezone()
         return zone
     return ""
 
 
 def enabled() -> bool:
-    return bool(_config.get("us_consistency_enabled", True))
+    return bool(_get_config().get("us_consistency_enabled", True))
 
 
 def timezone_name() -> str:
-    return str(_config.get("us_consistency_timezone") or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE
+    tz = getattr(_TLS, "timezone", "") or _get_config().get("us_consistency_timezone") or DEFAULT_TIMEZONE
+    return str(tz).strip() or DEFAULT_TIMEZONE
 
 
 def locale_name() -> str:
-    return str(_config.get("us_consistency_locale") or DEFAULT_LOCALE).strip() or DEFAULT_LOCALE
+    loc = getattr(_TLS, "locale", "") or _get_config().get("us_consistency_locale") or DEFAULT_LOCALE
+    return str(loc).strip() or DEFAULT_LOCALE
 
 
 def apply_process_timezone() -> str:
-    """在进程级设置 TZ，使 Chromium 子进程继承正确时区。
-
-    Chromium 在 Linux 上读取 TZ 环境变量决定本地时区；这是最可靠、
-    且不依赖 CDP 的注入方式（CDP 的 Emulation.setTimezoneOverride 只在
-    已建立的 target 上生效，新开的 tab 需要重新注入）。
-
-    返回实际生效的时区名。
-    """
+    """记录并返回当前线程会话生效的时区名，不修改父进程 os.environ['TZ'] 以防并发污染。"""
     if not enabled():
         return ""
     tz = timezone_name()
-    os.environ["TZ"] = tz
-    try:
-        time.tzset()  # POSIX: 让 C 库立即感知新的 TZ
-    except Exception:
-        pass
+    _TLS.timezone = tz
     return tz
 
 
@@ -355,7 +379,7 @@ def apply_browser_options(options) -> None:
     for argument in (
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--accept-lang=%s" % DEFAULT_ACCEPT_LANGUAGE,
+        "--accept-lang=%s" % _get_accept_language(),
         "--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints",
         "--disable-blink-features=AutomationControlled",
     ):
@@ -427,7 +451,7 @@ def page_override_script() -> str:
         "cores": DEFAULT_CORES,
         "memory": DEFAULT_DEVICE_MEMORY,
         "locale": locale,
-        "ua": str((_config or {}).get("user_agent") or ""),
+        "ua": str((_get_config() or {}).get("user_agent") or ""),
         "major": _chrome_version_from_ua(),
     }
 
@@ -454,7 +478,7 @@ def apply_page_overrides(page) -> bool:
         "Sec-CH-UA": _CH_UA_BRANDS % (major, major),
         "Sec-CH-UA-Platform": _CH_PLATFORM,
         "Sec-CH-UA-Platform-Version": _CH_PLATFORM_VERSION,
-        "Accept-Language": DEFAULT_ACCEPT_LANGUAGE,
+        "Accept-Language": _get_accept_language(),
     }
     try:
         page.run_cdp("Network.setExtraHTTPHeaders", headers=headers)
@@ -467,7 +491,7 @@ def describe() -> str:
     """返回人类可读的一致性摘要，用于启动日志。"""
     if not enabled():
         return "网络环境一致性: 已关闭（原版行为）"
-    country = _config.get("_detected_country") or "AUTO"
+    country = getattr(_TLS, "detected_country", "") or _get_config().get("_detected_country") or "AUTO"
     return "网络环境一致性: 已启用 (出口国家=%s, 时区=%s, 语言=%s, 平台=%s)" % (
         country,
         timezone_name(),

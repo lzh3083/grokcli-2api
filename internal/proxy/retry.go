@@ -32,18 +32,24 @@ func ShouldRetry(err error) bool {
 		return false
 	}
 
+	// 客户端主动取消或超时不重试
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	var statusCode int
 	var upstreamErr *grok.UpstreamError
-	if errors.As(err, &upstreamErr) {
+	if errors.As(err, &upstreamErr) && upstreamErr != nil {
+		statusCode = upstreamErr.Status
 		// 429 (Too Many Requests), 500, 502, 503, 504 应该重试
-		switch upstreamErr.Status {
+		switch statusCode {
 		case 429, 500, 502, 503, 504:
 			return true
 		}
 	}
 
-	// 网络错误、超时错误应该重试
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return false // 客户端主动取消不重试
+	if err != nil && statusCode == 0 {
+		return true
 	}
 
 	return false

@@ -32,7 +32,7 @@ func New(store *postgres.Connector, upstream string) *Service {
 	return &Service{
 		Store:      store,
 		Upstream:   strings.TrimRight(upstream, "/"),
-		Workers:    envInt("GROK2API_QUOTA_WORKERS", 3, 1, 8),
+		Workers:    envInt("GROK2API_QUOTA_WORKERS", 4, 1, 16),
 		httpClient: newQuotaHTTPClient(),
 	}
 }
@@ -160,6 +160,11 @@ func (s *Service) FetchAll(ctx context.Context) (map[string]any, error) {
 	if s.Store == nil {
 		return map[string]any{"ok": false, "error": "store unavailable"}, nil
 	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+	}
 	// Include disabled accounts so recovery can re-enable them after billing heals.
 	auths, err := s.Store.ListAccountAuths(ctx, 2000, false)
 	if err != nil {
@@ -167,10 +172,10 @@ func (s *Service) FetchAll(ctx context.Context) (map[string]any, error) {
 	}
 	workers := s.Workers
 	if workers <= 0 {
-		workers = 3
+		workers = 4
 	}
-	if workers > 2 {
-		workers = 2 // hard cap: avoid proxy connection stampede
+	if workers > 16 {
+		workers = 16
 	}
 	if workers > len(auths) && len(auths) > 0 {
 		workers = len(auths)
@@ -187,8 +192,12 @@ func (s *Service) FetchAll(ctx context.Context) (map[string]any, error) {
 		wg.Add(1)
 		go func(a postgres.AccountAuth) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 			item := s.fetchOne(ctx, a)
 			if item == nil {
 				item = map[string]any{"ok": false, "account_id": a.ID, "error": "empty quota result"}

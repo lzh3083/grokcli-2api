@@ -11,6 +11,9 @@ import (
 
 type Connector struct{ Pool *pgxpool.Pool }
 
+// Client aliases Connector for callers referencing postgres.Client.
+type Client = Connector
+
 func Open(ctx context.Context, databaseURL string) (*Connector, error) {
 	if databaseURL == "" {
 		return nil, errors.New("database URL is required")

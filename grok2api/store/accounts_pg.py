@@ -253,11 +253,11 @@ def list_account_summaries(
         size_i = int(page_size)
     except Exception:
         size_i = 25
-    if size_i <= 0 or size_i >= 10000:
-        # "all" mode still streams only summary fields
-        size_i = 0
+    if size_i <= 0 or size_i >= 2000:
+        # Cap maximum page size to avoid unbounded full-table scans in a single request
+        size_i = 2000
     else:
-        size_i = max(1, min(200, size_i))
+        size_i = max(1, min(2000, size_i))
 
     like = f"%{query}%" if query else None
     sso_clause = ""
@@ -631,12 +631,41 @@ def delete_account(account_id: str) -> bool:
         return False
     with connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_pool WHERE account_id = %s", (account_id,))
             cur.execute("DELETE FROM accounts WHERE id = %s", (account_id,))
             deleted = cur.rowcount > 0
-            cur.execute("DELETE FROM account_pool WHERE account_id = %s", (account_id,))
         conn.commit()
     if deleted:
         invalidate_auth_map_cache()
+    return deleted
+
+
+def delete_accounts(account_ids: list[str]) -> int:
+    if not enabled() or not account_ids:
+        return 0
+    cleaned = [str(aid).strip() for aid in account_ids if str(aid or "").strip()]
+    if not cleaned:
+        return 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_pool WHERE account_id = ANY(%s)", (cleaned,))
+            cur.execute("DELETE FROM accounts WHERE id = ANY(%s)", (cleaned,))
+            deleted = int(cur.rowcount or 0)
+        conn.commit()
+    invalidate_auth_map_cache()
+    return deleted
+
+
+def clear_all_accounts() -> int:
+    if not enabled():
+        return 0
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM account_pool")
+            cur.execute("DELETE FROM accounts")
+            deleted = int(cur.rowcount or 0)
+        conn.commit()
+    invalidate_auth_map_cache()
     return deleted
 
 

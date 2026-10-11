@@ -114,8 +114,20 @@ func (c *Connector) TouchAPIKeyUsage(ctx context.Context, keyID string) error {
 	return err
 }
 
+// ScrubPlaintextAPIKeySecrets clears historical plaintext secret column values in api_keys.
+func (c *Connector) ScrubPlaintextAPIKeySecrets(ctx context.Context) (int64, error) {
+	if c == nil || c.Pool == nil {
+		return 0, nil
+	}
+	tag, err := c.Pool.Exec(ctx, `UPDATE api_keys SET secret = '' WHERE secret <> ''`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (r APIKeyRecord) PublicMap() map[string]any {
-	out := map[string]any{
+	return map[string]any{
 		"id":            r.ID,
 		"name":          nonEmpty(r.Name, "unnamed"),
 		"prefix":        r.Prefix,
@@ -127,13 +139,6 @@ func (r APIKeyRecord) PublicMap() map[string]any {
 		"key_hint":      r.Prefix + "…****",
 		"has_secret":    r.Secret != nil && strings.TrimSpace(*r.Secret) != "",
 	}
-	if r.Secret != nil {
-		secret := strings.TrimSpace(*r.Secret)
-		if secret != "" && !strings.HasPrefix(secret, "enc:v1:") {
-			out["secret"] = secret
-		}
-	}
-	return out
 }
 
 func nonEmpty(value, fallback string) string {
@@ -181,7 +186,7 @@ func (c *Connector) CreateAPIKey(ctx context.Context, name, note string) (Create
 	_, err = c.Pool.Exec(ctx, `
 		INSERT INTO api_keys (id, name, prefix, key_hash, secret, enabled, note, created_at)
 		VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-	`, id, name, prefix, hash, secret, note, now)
+	`, id, name, prefix, hash, "", note, now)
 	if err != nil {
 		return CreateAPIKeyResult{}, err
 	}
@@ -245,7 +250,7 @@ func (c *Connector) RegenerateAPIKey(ctx context.Context, id string) (CreateAPIK
 	hash := hashAPIKey(secret)
 	_, err = c.Pool.Exec(ctx, `
 		UPDATE api_keys SET prefix = $2, key_hash = $3, secret = $4 WHERE id = $1
-	`, id, prefix, hash, secret)
+	`, id, prefix, hash, "")
 	if err != nil {
 		return CreateAPIKeyResult{}, err
 	}

@@ -13,9 +13,11 @@ Providers:
 from __future__ import annotations
 
 import email
+import ipaddress
 import os
 import random
 import re
+import socket
 import time
 from email import policy
 from typing import Any
@@ -61,6 +63,70 @@ def _headers(api_key: str | None = None) -> dict[str, str]:
     if not key:
         return {}
     return {"X-API-Key": key}
+
+
+def validate_mail_base_url(base_url: str | None) -> str:
+    """Validate that a mail provider base_url uses http/https, has a non-empty hostname,
+    and does not point to link-local / cloud metadata (169.254.0.0/16, fe80::/10) or
+    loopback/private/reserved addresses (unless GROK2API_ALLOW_PRIVATE_MAIL_URLS=1).
+    """
+    raw = str(base_url or "").strip().rstrip("/")
+    if not raw:
+        raise ValueError("base_url must not be empty")
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("base_url must use http or https scheme with a valid hostname")
+    if parsed.username is not None or parsed.password is not None or "@" in (parsed.netloc or ""):
+        raise ValueError("base_url must not contain userinfo (username/password)")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("base_url contains an invalid port") from exc
+    if port is not None and not (1 <= int(port) <= 65535):
+        raise ValueError(f"base_url port out of range: {port}")
+    host = parsed.hostname.strip().lower()
+    if host in ("169.254.169.254", "metadata.google.internal", "metadata.tencentyun.com", "100.100.100.200"):
+        raise ValueError(f"disallowed cloud metadata host in base_url: {host}")
+    allow_private = str(os.environ.get("GROK2API_ALLOW_PRIVATE_MAIL_URLS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not allow_private and (host in ("localhost", "localhost.localdomain") or host.endswith(".localhost")):
+        raise ValueError(f"disallowed loopback host in base_url: {host}")
+
+    def _check_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address, label: str) -> None:
+        if (
+            ip_obj.is_link_local
+            or ip_obj.is_unspecified
+            or ip_obj.is_multicast
+            or str(ip_obj) in ("169.254.169.254", "100.100.100.200")
+        ):
+            raise ValueError(f"disallowed link-local/metadata IP in base_url: {label}")
+        if not allow_private and (
+            ip_obj.is_loopback
+            or ip_obj.is_private
+            or ip_obj.is_reserved
+        ):
+            raise ValueError(f"disallowed loopback/private/reserved IP in base_url: {label}")
+
+    try:
+        ip_obj = ipaddress.ip_address(host.strip("[]"))
+        _check_ip(ip_obj, host)
+    except ValueError as exc:
+        if "disallowed" in str(exc):
+            raise
+        try:
+            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            for info in infos:
+                ip_str = info[4][0].split("%", 1)[0]
+                ip_resolved = ipaddress.ip_address(ip_str)
+                _check_ip(ip_resolved, f"{host} ({ip_str})")
+        except ValueError:
+            raise
+        except Exception:
+            pass
+    return raw
 
 
 def normalize_mail_provider(provider: str | None, *, base_url: str | None = None) -> str:
@@ -193,7 +259,7 @@ def normalize_yyds_base_url(base_url: str | None = None) -> str:
     # Unknown custom host (self-proxy) — allow; otherwise pin official.
     if "215.im" in (parsed.netloc or "").lower():
         return YYDS_DEFAULT_BASE_URL
-    return origin or YYDS_DEFAULT_BASE_URL
+    return validate_mail_base_url(origin or YYDS_DEFAULT_BASE_URL)
 
 
 def normalize_gptmail_base_url(base_url: str | None = None) -> str:
@@ -223,7 +289,7 @@ def normalize_gptmail_base_url(base_url: str | None = None) -> str:
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
     if not parsed.netloc:
         return GPTMAIL_DEFAULT_BASE_URL
-    return origin or GPTMAIL_DEFAULT_BASE_URL
+    return validate_mail_base_url(origin or GPTMAIL_DEFAULT_BASE_URL)
 
 
 
@@ -320,7 +386,7 @@ def normalize_cfmail_base_url(base_url: str | None = None) -> str:
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
     if not parsed.netloc:
         return CFMAIL_DEFAULT_BASE_URL
-    return origin or CFMAIL_DEFAULT_BASE_URL
+    return validate_mail_base_url(origin or CFMAIL_DEFAULT_BASE_URL)
 
 
 def _cfmail_headers(
@@ -500,7 +566,7 @@ def moemail_create_mailbox(
             "MoeMail API key missing. Set GROK2API_MOEMAIL_API_KEY or pass api_key."
         )
 
-    base = (base_url or MOEMAIL_BASE_URL).rstrip("/")
+    base = validate_mail_base_url(base_url or MOEMAIL_BASE_URL)
     # MoeMail only accepts official presets: 3600000 / 86400000 / 259200000 / 0.
     # Do not use `expiry_ms or default` — permanent is 0 and must be preserved.
     _OFFICIAL = {3_600_000, 86_400_000, 259_200_000, 0}
@@ -589,7 +655,7 @@ def moemail_fetch_messages(
     if not (api_key or MOEMAIL_API_KEY):
         return []
 
-    base = (base_url or MOEMAIL_BASE_URL).rstrip("/")
+    base = validate_mail_base_url(base_url or MOEMAIL_BASE_URL)
     with httpx.Client(timeout=30.0) as client:
         resp = client.get(f"{base}/api/emails/{email_id}", headers=_headers(api_key))
         if resp.status_code >= 400:
@@ -1677,7 +1743,7 @@ def normalize_tempmail_base_url(base_url: str | None = None) -> str:
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
     if not parsed.netloc:
         return TEMPMAIL_LOL_DEFAULT_BASE_URL
-    return origin or TEMPMAIL_LOL_DEFAULT_BASE_URL
+    return validate_mail_base_url(origin or TEMPMAIL_LOL_DEFAULT_BASE_URL)
 
 
 def tempmail_create_mailbox(
@@ -1880,7 +1946,7 @@ def normalize_cloudmail_base_url(base_url: str | None = None) -> str:
     if not parsed.netloc:
         return ""
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}".rstrip("/")
-    return origin
+    return validate_mail_base_url(origin)
 
 
 def _cloudmail_parse_credential(api_key: str | None) -> tuple[str, str]:

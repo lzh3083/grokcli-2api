@@ -395,3 +395,25 @@ func TestExtractConvIDClaudeCodeUser(t *testing.T) {
 		t.Fatalf("metadata session: %q", id3)
 	}
 }
+
+func TestSanitizeConvID(t *testing.T) {
+	dirty := "conv\r\nInjected: bad\x00_" + strings.Repeat("a", 200)
+	got := sanitizeConvID(dirty)
+	if strings.ContainsAny(got, "\r\n\x00 ") {
+		t.Fatalf("unexpected control chars in conv id: %q", got)
+	}
+	if len(got) != 128 {
+		t.Fatalf("expected length capped at 128, got %d", len(got))
+	}
+}
+
+func TestResponsesBridgeForwardsTopLevelError(t *testing.T) {
+	src := "data: {\"error\":{\"message\":\"quota exceeded\",\"type\":\"rate_limit_error\"}}\n\n"
+	var out strings.Builder
+	if err := translateOrPassthroughSSE(strings.NewReader(src), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "quota exceeded") {
+		t.Fatalf("expected error payload to be preserved, got %q", out.String())
+	}
+}

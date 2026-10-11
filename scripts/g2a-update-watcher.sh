@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# LEGACY host-side hot-update watcher for grokcli-2api.
-# Prefer in-container mode (docker.sock + scripts/g2a-hot-update-incontainer.sh).
-# Only needed when GROK2API_HOT_UPDATE_MODE=request_file.
+# Host-side hot-update watcher for grokcli-2api (default GROK2API_HOT_UPDATE_MODE=request_file).
+# For in-container self-update mode, stack -f docker-compose.hot-update.yml instead.
 # Polls data/update.request written by the admin UI, then:
 #   1) retarget compose image to GHCR tag (when G2A_USE_GHCR=1 or request image set)
 #   2) docker compose pull
@@ -9,7 +8,7 @@
 #
 # Usage (host):
 #   export G2A_COMPOSE_DIR=/root/grokcli-2api
-#   export G2A_DATA_DIR=/var/lib/grokcli-2api/data
+#   export G2A_DATA_DIR="${G2A_COMPOSE_DIR}/data"
 #   ./scripts/g2a-update-watcher.sh
 #
 # Optional env:
@@ -21,8 +20,13 @@
 
 set -euo pipefail
 
-COMPOSE_DIR="${G2A_COMPOSE_DIR:-/root/grokcli-2api}"
-DATA_DIR="${G2A_DATA_DIR:-/var/lib/grokcli-2api/data}"
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -z "${G2A_COMPOSE_DIR:-}" && -f "${SCRIPT_ROOT}/docker-compose.yml" ]]; then
+  COMPOSE_DIR="${SCRIPT_ROOT}"
+else
+  COMPOSE_DIR="${G2A_COMPOSE_DIR:-/root/grokcli-2api}"
+fi
+DATA_DIR="${G2A_DATA_DIR:-${COMPOSE_DIR}/data}"
 POLL_SEC="${G2A_POLL_SEC:-5}"
 SERVICE="${G2A_SERVICE:-grokcli-2api}"
 USE_GHCR="${G2A_USE_GHCR:-1}"
@@ -73,14 +77,14 @@ YAML
 }
 
 compose() {
-  # shellcheck disable=SC2086
-  if [[ -f "${COMPOSE_DIR}/${OVERRIDE_FILE}" ]]; then
-    docker compose -f docker-compose.yml -f docker-compose.override.yml -f "${OVERRIDE_FILE}" "$@"
-  elif [[ -f "${COMPOSE_DIR}/docker-compose.override.yml" ]]; then
-    docker compose -f docker-compose.yml -f docker-compose.override.yml "$@"
-  else
-    docker compose "$@"
+  local compose_args=(-f "${COMPOSE_DIR}/docker-compose.yml")
+  if [[ -f "${COMPOSE_DIR}/docker-compose.override.yml" ]]; then
+    compose_args+=(-f "${COMPOSE_DIR}/docker-compose.override.yml")
   fi
+  if [[ -f "${COMPOSE_DIR}/${OVERRIDE_FILE}" ]]; then
+    compose_args+=(-f "${COMPOSE_DIR}/${OVERRIDE_FILE}")
+  fi
+  docker compose "${compose_args[@]}" "$@"
 }
 
 run_update() {

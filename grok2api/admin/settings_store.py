@@ -202,13 +202,10 @@ def _write_disk(data: dict[str, Any]) -> None:
             for key in _PG_SCALAR_KEYS:
                 if key not in data:
                     continue
-                try:
-                    val = data.get(key)
-                    if key in ("token_maintain_enabled", "model_health_enabled"):
-                        val = bool(val)
-                    pg.set_setting(key, val)
-                except Exception:
-                    pass
+                val = data.get(key)
+                if key in ("token_maintain_enabled", "model_health_enabled"):
+                    val = bool(val)
+                pg.set_setting(key, val)
             admin = {
                 k: data[k]
                 for k in (
@@ -233,8 +230,9 @@ def _write_disk(data: dict[str, Any]) -> None:
             # PostgreSQL is the durable store — do not mirror settings.json at runtime.
             # settings.json remains only for STORE_BACKEND=file and migrate import.
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[settings_store] ERROR: PostgreSQL settings write failed (refusing plaintext file fallback): {exc}", flush=True)
+            raise
     # File-mode fallback (explicit STORE_BACKEND=file / PG unavailable).
     _ensure()
     tmp = SETTINGS_FILE.with_suffix(".tmp")

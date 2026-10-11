@@ -6,6 +6,7 @@ import random
 import re
 import secrets
 import struct
+import threading
 import time
 
 try:  # DrissionPage 仅在 GROK2API_BROWSER_ENGINE=chromium 回退时可用
@@ -54,6 +55,94 @@ browser_started_with_proxy = False
 cf_clearance = ""
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
+_tls = threading.local()
+_ACTIVE_BROWSER_LOCK = threading.Lock()
+_ACTIVE_BROWSER_SESSIONS: set[int] = set()
+
+
+def _get_browser():
+    if hasattr(_tls, "browser") and _tls.browser is not None:
+        return _tls.browser
+    with _ACTIVE_BROWSER_LOCK:
+        if threading.get_ident() in _ACTIVE_BROWSER_SESSIONS:
+            return getattr(_tls, "browser", None)
+        if not _ACTIVE_BROWSER_SESSIONS:
+            return browser
+    return getattr(_tls, "browser", None)
+
+
+def _set_browser(val):
+    global browser
+    _tls.browser = val
+    browser = val
+    with _ACTIVE_BROWSER_LOCK:
+        tid = threading.get_ident()
+        if val is not None:
+            _ACTIVE_BROWSER_SESSIONS.add(tid)
+        else:
+            _ACTIVE_BROWSER_SESSIONS.discard(tid)
+
+
+def _get_page():
+    if hasattr(_tls, "page") and _tls.page is not None:
+        return _tls.page
+    with _ACTIVE_BROWSER_LOCK:
+        if threading.get_ident() in _ACTIVE_BROWSER_SESSIONS:
+            return getattr(_tls, "page", None)
+        if not _ACTIVE_BROWSER_SESSIONS:
+            return page
+    return getattr(_tls, "page", None)
+
+
+def _set_page(val):
+    global page
+    _tls.page = val
+    page = val
+
+
+def _get_bridge():
+    if hasattr(_tls, "browser_proxy_bridge"):
+        return _tls.browser_proxy_bridge
+    return browser_proxy_bridge
+
+
+def _set_bridge(val):
+    global browser_proxy_bridge
+    _tls.browser_proxy_bridge = val
+    browser_proxy_bridge = val
+
+
+def _get_started_with_proxy() -> bool:
+    if hasattr(_tls, "browser_started_with_proxy"):
+        return bool(_tls.browser_started_with_proxy)
+    return bool(browser_started_with_proxy)
+
+
+def _set_started_with_proxy(val: bool):
+    global browser_started_with_proxy
+    _tls.browser_started_with_proxy = bool(val)
+    browser_started_with_proxy = bool(val)
+
+
+def _get_cf_clearance() -> str:
+    if hasattr(_tls, "cf_clearance"):
+        return str(_tls.cf_clearance or "")
+    return str(cf_clearance or "")
+
+
+def _set_cf_clearance(val: str):
+    global cf_clearance
+    _tls.cf_clearance = str(val or "")
+    cf_clearance = str(val or "")
+
+
+def _get_runtime_cfg() -> dict:
+    local_cfg = getattr(_tls, "runtime_cfg", None)
+    if isinstance(local_cfg, dict) and local_cfg:
+        return local_cfg
+    return config if isinstance(config, dict) else {}
+
+
 TURNSTILE_ABSENT = "ABSENT"
 TURNSTILE_LOADING = "LOADING"
 TURNSTILE_WAITING = "WAITING"
@@ -69,7 +158,8 @@ def _mark_registration_stage(stage):
 
 def _managed_proxy_mode():
     try:
-        return str(config.get("proxy_mode", "auto") or "auto").strip().lower() in ("single", "pool")
+        cfg_src = _get_runtime_cfg()
+        return str(cfg_src.get("proxy_mode", config.get("proxy_mode", "auto")) or "auto").strip().lower() in ("single", "pool")
     except Exception:
         return False
 
@@ -85,7 +175,8 @@ def _is_pre_submit_js_transient(exc):
 
 def _run_pre_submit_js(script, *args):
     try:
-        return page.run_js(script, *args)
+        cur_page = _get_page()
+        return cur_page.run_js(script, *args)
     except Exception as exc:
         if _is_pre_submit_js_transient(exc):
             raise AccountRetryNeeded(f"提交前浏览器 JS 暂时失败: {exc}") from exc
@@ -101,12 +192,15 @@ _OWN_NAMES = {'is_cloudflare_block_response', 'response_preview', 'start_browser
 
 
 def bind_runtime(namespace):
+    local_cfg = dict(getattr(_tls, "runtime_cfg", None) or {})
     for name, value in namespace.items():
         if name.startswith("__") or name in _OWN_NAMES or name in {
             "browser", "page", "browser_proxy_bridge", "browser_started_with_proxy", "cf_clearance",
         }:
             continue
+        local_cfg[name] = value
         globals()[name] = value
+    _tls.runtime_cfg = local_cfg
 
 
 def generate_random_birthdate():
@@ -286,19 +380,19 @@ def check_imagine_capability(log_callback=None, cancel_callback=None):
       False → 明确提示需要 credits 或订阅
       None  → 探测本身没做成（页面没就绪等），不代表账号能力
     """
-    global page
-    if page is None:
+    cur_page = _get_page()
+    if cur_page is None:
         return None, "浏览器未就绪"
     raise_if_cancelled(cancel_callback)
     try:
-        page.get("https://grok.com/imagine", timeout=45)
-        page.wait.doc_loaded()
+        cur_page.get("https://grok.com/imagine", timeout=45)
+        cur_page.wait.doc_loaded()
     except Exception as exc:
         return None, f"打开 Imagine 页面失败: {exc}"
     sleep_with_cancel(7, cancel_callback)
 
     try:
-        raw = page.run_js(r"""
+        raw = cur_page.run_js(r"""
 const body = document.body ? document.body.innerText : '';
 return JSON.stringify({
   url: location.href,
@@ -332,12 +426,12 @@ def _try_generate_image(cancel_callback=None):
 
     返回 (True, ...) 生成了图片 / (False, ...) 被额度拦住 / (None, ...) 没判定出来。
     """
-    global page
-    if page is None:
+    cur_page = _get_page()
+    if cur_page is None:
         return None, "浏览器未就绪"
     before = set()
     try:
-        state = page.run_js(r"""
+        state = cur_page.run_js(r"""
 const imgs = Array.from(document.querySelectorAll('img'))
   .map(i => i.currentSrc || i.src || '')
   .filter(Boolean);
@@ -351,7 +445,7 @@ return JSON.stringify({imgs: imgs});
     box_loc = ""
     for loc in ("tag:textarea", "@contenteditable=true", "tag:input@@type=text"):
         try:
-            box = page.ele(loc, timeout=3)
+            box = cur_page.ele(loc, timeout=3)
         except Exception:
             box = None
         if box:
@@ -369,7 +463,7 @@ return JSON.stringify({imgs: imgs});
         for loc in ("tag:button@@aria-label*=end", "tag:button@@aria-label*=Send",
                     "tag:button@@type=submit", "tag:button@@text()=Send"):
             try:
-                btn = page.ele(loc, timeout=2)
+                btn = cur_page.ele(loc, timeout=2)
             except Exception:
                 btn = None
             if btn:
@@ -392,7 +486,7 @@ return JSON.stringify({imgs: imgs});
         sleep_with_cancel(3, cancel_callback)
         raise_if_cancelled(cancel_callback)
         try:
-            state = page.run_js(r"""
+            state = cur_page.run_js(r"""
 const body = document.body ? document.body.innerText : '';
 const imgs = Array.from(document.querySelectorAll('img'))
   .map(i => i.currentSrc || i.src || '')
@@ -416,8 +510,14 @@ return JSON.stringify({
         sent, box_loc, len(before), last_tail.replace("\n", " ")[:220])
 
 def _kill_stale_registration_browser_procs():
-    """清理本进程派生但未正常退出的 node / camoufox-bin 浏览器孤儿进程，防止卡死。"""
+    """清理本进程派生但未正常退出的 node / camoufox-bin 浏览器孤儿进程，防止卡死。
+    当仍有其他线程持有活跃浏览器会话时，禁止执行全进程后代无差别 SIGKILL，以免误杀并发会话的浏览器。
+    """
     try:
+        with _ACTIVE_BROWSER_LOCK:
+            other_active = _ACTIVE_BROWSER_SESSIONS - {threading.get_ident()}
+            if other_active:
+                return
         import os, signal
         my_pid = os.getpid()
         children_pids = set()
@@ -461,22 +561,24 @@ def _kill_stale_registration_browser_procs():
 
 
 def stop_browser_proxy_bridge():
-    global browser_proxy_bridge
-    if browser_proxy_bridge is not None:
+    cur_bridge = _get_bridge()
+    if cur_bridge is not None:
         try:
-            browser_proxy_bridge.stop()
+            cur_bridge.stop()
         except Exception:
             pass
-    browser_proxy_bridge = None
+    _set_bridge(None)
 
 def start_browser(log_callback=None, use_proxy=True):
-    global browser, page, browser_proxy_bridge, browser_started_with_proxy
     last_exc = None
     proxy_enabled = bool(use_proxy and get_configured_proxy())
-    # 启动前先行清理残留的本进程游离浏览器子进程
+    # 启动前先行清理残留的本进程游离浏览器子进程（仅当无其他活跃会话时）
     _kill_stale_registration_browser_procs()
+    with _ACTIVE_BROWSER_LOCK:
+        _ACTIVE_BROWSER_SESSIONS.add(threading.get_ident())
     for attempt in range(1, 5):
         bridge = None
+        cur_browser = None
         try:
             browser_proxy, bridge = prepare_browser_proxy(use_proxy=use_proxy, log_callback=log_callback)
             # 时区必须与代理真实出口地区一致，且必须在 Chromium 启动前确定：
@@ -490,7 +592,8 @@ def start_browser(log_callback=None, use_proxy=True):
                     if us_consistency.enabled():
                         expect = "US"
                         try:
-                            expect = str(config.get("us_consistency_expect_country") or "US")
+                            cfg_src = _get_runtime_cfg()
+                            expect = str(cfg_src.get("us_consistency_expect_country") or config.get("us_consistency_expect_country") or "US")
                         except Exception:
                             pass
                         zone = us_consistency.align_timezone_with_proxy(browser_proxy, expect_country=expect)
@@ -505,10 +608,14 @@ def start_browser(log_callback=None, use_proxy=True):
             timer = None
             def _watchdog_trigger():
                 if log_callback:
-                    log_callback(f"[!] 启动 {engine} 浏览器超过 45s，强杀挂起子进程以解除阻塞...")
+                    log_callback(f"[!] 启动 {engine} 浏览器超过 45s，尝试终止当前阻塞实例...")
+                try:
+                    if cur_browser is not None:
+                        cur_browser.quit(del_data=True)
+                except Exception:
+                    pass
                 _kill_stale_registration_browser_procs()
 
-            import threading
             timer = threading.Timer(45.0, _watchdog_trigger)
             timer.daemon = True
             timer.start()
@@ -519,17 +626,19 @@ def start_browser(log_callback=None, use_proxy=True):
                     # cf_clearance；Chromium 走 CDP，2026-09-28 起必被 Cloudflare
                     # Bot Management 拦截，注册静默失败。
                     from camoufox_compat import CamoufoxBrowser
-                    browser = CamoufoxBrowser(options)
+                    cur_browser = CamoufoxBrowser(options)
                 else:
-                    browser = Chromium(options)
+                    cur_browser = Chromium(options)
+                _set_browser(cur_browser)
+                _set_bridge(bridge)
+                _set_started_with_proxy(bool(browser_proxy))
+                tabs = cur_browser.get_tabs()
+                cur_page = tabs[-1] if tabs else cur_browser.new_tab()
+                _set_page(cur_page)
             finally:
                 if timer is not None:
                     timer.cancel()
 
-            browser_proxy_bridge = bridge
-            browser_started_with_proxy = bool(browser_proxy)
-            tabs = browser.get_tabs()
-            page = tabs[-1] if tabs else browser.new_tab()
             # 美国环境一致性：注入 navigator 覆盖脚本与 Client Hints，
             # 使 JS 可见指纹与 UA 声称的 Windows 桌面环境保持一致。
             # Camoufox 走 Juggler 且自带完整指纹伪造，没有 run_cdp，
@@ -538,19 +647,19 @@ def start_browser(log_callback=None, use_proxy=True):
                 try:
                     import us_consistency
                     if us_consistency.enabled():
-                        us_consistency.apply_page_overrides(page)
+                        us_consistency.apply_page_overrides(cur_page)
                         if log_callback:
                             log_callback("[*] %s" % us_consistency.describe())
                 except Exception:
                     pass
-            if log_callback and getattr(browser, "user_data_path", None):
-                log_callback(f"[Debug] 当前浏览器资料目录: {browser.user_data_path}")
+            if log_callback and getattr(cur_browser, "user_data_path", None):
+                log_callback(f"[Debug] 当前浏览器资料目录: {cur_browser.user_data_path}")
             if log_callback and get_configured_proxy():
-                mode = "代理" if browser_started_with_proxy else "直连"
+                mode = "代理" if _get_started_with_proxy() else "直连"
                 log_callback(f"[*] 浏览器网络模式: {mode}")
             if log_callback and attempt > 1:
                 log_callback(f"[*] 浏览器第 {attempt} 次启动成功")
-            return browser, page
+            return cur_browser, cur_page
         except Exception as exc:
             last_exc = exc
             if bridge is not None:
@@ -562,32 +671,38 @@ def start_browser(log_callback=None, use_proxy=True):
                 mode = "代理" if proxy_enabled else "直连"
                 log_callback(f"[Debug] 浏览器{mode}启动失败(第{attempt}/4次): {exc}")
             try:
-                if browser is not None:
-                    browser.quit(del_data=True)
+                b_to_quit = cur_browser or _get_browser()
+                if b_to_quit is not None:
+                    b_to_quit.quit(del_data=True)
             except Exception:
                 pass
             _kill_stale_registration_browser_procs()
-            browser = None
-            page = None
-            browser_proxy_bridge = None
-            browser_started_with_proxy = False
+            _set_browser(None)
+            _set_page(None)
+            _set_bridge(None)
+            _set_started_with_proxy(False)
+            with _ACTIVE_BROWSER_LOCK:
+                if attempt < 4:
+                    _ACTIVE_BROWSER_SESSIONS.add(threading.get_ident())
             time.sleep(min(1.5 * attempt, 4))
+    with _ACTIVE_BROWSER_LOCK:
+        _ACTIVE_BROWSER_SESSIONS.discard(threading.get_ident())
     if _managed_proxy_mode() and is_proxy_connection_error(last_exc):
         raise ProxyTransportError("Chromium 通过当前代理启动失败: %s" % safe_proxy_error_text(last_exc)) from last_exc
     raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
 
 def stop_browser():
-    global browser, page, browser_started_with_proxy
-    if browser is not None:
+    cur_browser = _get_browser()
+    if cur_browser is not None:
         try:
-            browser.quit(del_data=True)
+            cur_browser.quit(del_data=True)
         except Exception:
             pass
+    _set_browser(None)
+    _set_page(None)
+    _set_started_with_proxy(False)
     _kill_stale_registration_browser_procs()
     stop_browser_proxy_bridge()
-    browser = None
-    page = None
-    browser_started_with_proxy = False
 
 def restart_browser(log_callback=None, use_proxy=True):
     stop_browser()
@@ -597,34 +712,29 @@ def cleanup_runtime_memory(log_callback=None, reason="定期清理"):
     if log_callback:
         log_callback(f"[*] {reason}: 关闭浏览器并清理内存")
     stop_browser()
-    # 回收退出的浏览器僵尸子进程 (<defunct>)
-    try:
-        while True:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-            if pid <= 0:
-                break
-    except Exception:
-        pass
     collected = gc.collect()
     if log_callback:
         log_callback(f"[*] Python GC 已回收对象数: {collected}")
 
 def refresh_active_page():
-    global browser, page
-    if browser is None:
-        restart_browser()
+    cur_browser = _get_browser()
+    use_proxy = _get_started_with_proxy() or bool(get_configured_proxy())
+    if cur_browser is None:
+        restart_browser(use_proxy=use_proxy)
+        cur_browser = _get_browser()
     try:
-        tabs = browser.get_tabs()
+        tabs = cur_browser.get_tabs()
         if tabs:
-            page = tabs[-1]
+            cur_page = tabs[-1]
         else:
-            page = browser.new_tab()
+            cur_page = cur_browser.new_tab()
+        _set_page(cur_page)
     except Exception:
-        restart_browser()
-    return page
+        restart_browser(use_proxy=use_proxy)
+        cur_page = _get_page()
+    return cur_page
 
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
-    global page
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -678,41 +788,43 @@ return candidates[0].text || true;
             sleep_with_cancel(2, cancel_callback)
             return True
 
+        cur_page = _get_page()
         if log_callback:
-            current_url = page.url if page else "none"
+            current_url = cur_page.url if cur_page else "none"
             log_callback(f"[Debug] 当前URL: {current_url}")
 
         sleep_with_cancel(1, cancel_callback)
 
+    cur_page = _get_page()
     if log_callback:
-        page_html = page.html[:500] if page else "no page"
+        page_html = cur_page.html[:500] if cur_page else "no page"
         log_callback(f"[Debug] 页面内容片段: {page_html}")
 
     raise Exception("未找到「使用邮箱注册」按钮")
 
 def open_signup_page(log_callback=None, cancel_callback=None):
-    global browser, page
     raise_if_cancelled(cancel_callback)
-    if browser is None:
+    if _get_browser() is None:
         start_browser(log_callback=log_callback)
         if log_callback:
             log_callback("[*] 浏览器已启动")
 
     def _open_with_current_browser():
-        global page
+        cur_browser = _get_browser()
         try:
-            page = browser.get_tab(0)
-            page.get(SIGNUP_URL)
+            cur_page = cur_browser.get_tab(0)
+            cur_page.get(SIGNUP_URL)
         except Exception as e:
             if log_callback:
                 log_callback(f"[Debug] 打开URL异常: {e}")
-            page = browser.new_tab(SIGNUP_URL)
-        page.wait.doc_loaded()
+            cur_page = cur_browser.new_tab(SIGNUP_URL)
+        _set_page(cur_page)
+        cur_page.wait.doc_loaded()
 
     try:
         _open_with_current_browser()
     except Exception as e:
-        if browser_started_with_proxy and get_configured_proxy():
+        if _get_started_with_proxy() and get_configured_proxy():
             if _managed_proxy_mode():
                 raise ProxyTransportError("当前代理访问注册页失败: %s" % safe_proxy_error_text(e)) from e
             if log_callback:
@@ -722,17 +834,19 @@ def open_signup_page(log_callback=None, cancel_callback=None):
         else:
             raise
 
-    if browser_started_with_proxy and page_has_proxy_error(page):
+    cur_page = _get_page()
+    if _get_started_with_proxy() and page_has_proxy_error(cur_page):
         if _managed_proxy_mode():
             raise ProxyTransportError("Chromium 页面显示代理连接错误")
         if log_callback:
             log_callback("[!] 浏览器页面显示代理错误，自动回退直连")
         restart_browser(log_callback=log_callback, use_proxy=False)
         _open_with_current_browser()
+        cur_page = _get_page()
 
     sleep_with_cancel(2, cancel_callback)
     if log_callback:
-        log_callback(f"[*] 当前URL: {page.url}")
+        log_callback(f"[*] 当前URL: {cur_page.url}")
     # 拟人化：打开注册页后模拟人类视读停留
     human_read_sec = random.uniform(1.2, 2.5)
     if log_callback:
@@ -743,10 +857,10 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     )
 
 def has_profile_form(log_callback=None):
-    refresh_active_page()
+    cur_page = refresh_active_page()
     try:
         return bool(
-            page.run_js(
+            cur_page.run_js(
                 """
 const givenInput = document.querySelector('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"]');
 const familyInput = document.querySelector('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"]');
@@ -926,7 +1040,8 @@ return candidates[0].text || true;
                 last_diag_time = now
                 inputs = " | ".join((filled or {}).get("inputs", [])[:6])
                 buttons = " | ".join((filled or {}).get("buttons", [])[:8])
-                url = (filled or {}).get("url", page.url if page else "")
+                cur_page = _get_page()
+                url = (filled or {}).get("url", cur_page.url if cur_page else "")
                 log_callback(f"[Debug] 等待邮箱输入框: url={url}; inputs={inputs or 'none'}; buttons={buttons or 'none'}")
             sleep_with_cancel(0.5, cancel_callback)
             continue
@@ -966,7 +1081,7 @@ return (input.getAttribute('type') || '').toLowerCase() !== 'email' || input.che
             sleep_with_cancel(0.5, cancel_callback)
             continue
         _mark_registration_stage("email_submit")
-        clicked = page.run_js(
+        clicked = _get_page().run_js(
             r"""
 function isVisible(node) {
     if (!node) return false;
@@ -1049,7 +1164,8 @@ return 'enter';
     if last_snapshot:
         inputs = " | ".join(last_snapshot.get("inputs", [])[:6])
         buttons = " | ".join(last_snapshot.get("buttons", [])[:8])
-        url = last_snapshot.get("url", page.url if page else "")
+        cur_page = _get_page()
+        url = last_snapshot.get("url", cur_page.url if cur_page else "")
         raise Exception(
             f"未找到邮箱输入框或注册按钮，最后页面: url={url}; inputs={inputs or 'none'}; buttons={buttons or 'none'}"
         )
@@ -1057,8 +1173,10 @@ return 'enter';
 
 def fill_code_and_submit(email, dev_token, timeout=180, transition_timeout=15, log_callback=None, cancel_callback=None):
     def _resend_code():
-        page.run_js(
-            r"""
+        cur_page = _get_page()
+        if cur_page is not None:
+            cur_page.run_js(
+                r"""
 const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 const target = nodes.find((node) => {
   const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
@@ -1066,8 +1184,8 @@ const target = nodes.find((node) => {
 });
 if (target && !target.disabled) { target.click(); return true; }
 return false;
-            """
-        )
+                """
+            )
 
     _mark_registration_stage("code_wait")
     code = get_oai_code(
@@ -1091,7 +1209,7 @@ return false;
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        ready = page.run_js(
+        ready = _get_page().run_js(
             """
 const code = String(arguments[0] || '').trim();
 if (!code) return 'not-ready';
@@ -1120,7 +1238,7 @@ return otpBoxes.length >= code.length ? 'boxes' : 'not-ready';
             sleep_with_cancel(0.5, cancel_callback)
             continue
         _mark_registration_stage("code_submit")
-        filled = page.run_js(
+        filled = _get_page().run_js(
             """
 const code = String(arguments[0] || '').trim();
 if (!code) return 'empty-code';
@@ -1190,7 +1308,7 @@ return 'not-ready';
             sleep_with_cancel(0.5, cancel_callback)
             continue
 
-        clicked = page.run_js(
+        clicked = _get_page().run_js(
             r"""
 function isVisible(node) {
     if (!node) return false;
@@ -1237,7 +1355,7 @@ return 'clicked';
                         log_callback("[*] 验证码提交已确认，资料页已出现")
                     return code
                 try:
-                    rejection = page.run_js(
+                    rejection = _get_page().run_js(
                         r"""
 const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').toLowerCase();
 const markers = [
@@ -1272,7 +1390,8 @@ return markers.find((item) => text.includes(item)) || '';
 
 def _read_turnstile_state():
     """只读 Turnstile 状态，不重置、不点击、不修改页面。"""
-    if page is None:
+    cur_page = _get_page()
+    if cur_page is None:
         return {
             "state": TURNSTILE_ABSENT,
             "present": False,
@@ -1284,7 +1403,7 @@ def _read_turnstile_state():
             "visible": False,
         }
 
-    state_raw = page.run_js(
+    state_raw = cur_page.run_js(
         """
 try {
   function isVisible(node) {
@@ -1397,9 +1516,10 @@ def _resolve_turnstile_sitekey(log_callback=None):
                 return key
     except Exception:
         pass
-    if page is not None:
+    cur_page = _get_page()
+    if cur_page is not None:
         try:
-            found = page.run_js(
+            found = cur_page.run_js(
                 r"""
 try {
   const node = document.querySelector('[data-sitekey]');
@@ -1442,6 +1562,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
         return False
 
     sitekey = _resolve_turnstile_sitekey(log_callback)
+    cur_page = _get_page()
 
     # 路径 1：配置了打码服务（含本地 Camoufox solver）时优先调用
     settings = captcha_solver.settings_from_config()
@@ -1455,7 +1576,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
             pass
         try:
             result = captcha_solver.solve_and_inject(
-                page,
+                cur_page,
                 settings["api_key"],
                 log=log_callback,
                 api_base=settings["api_base"],
@@ -1476,7 +1597,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
             token_val = result.get("token") or (_read_turnstile_state() or {}).get("token") or ""
             if token_val:
                 try:
-                    res = captcha_solver.activate_turnstile_bridge(page, token_val)
+                    res = captcha_solver.activate_turnstile_bridge(cur_page, token_val)
                     if log_callback:
                         log_callback(f"[*] 打码 token 已桥接到 React bridge: {res}")
                 except Exception as exc:
@@ -1501,7 +1622,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
         token = ""
         try:
             token = captcha_solver.solve_turnstile_in_page(
-                page,
+                cur_page,
                 sitekey,
                 log=log_callback,
                 timeout_sec=12,
@@ -1511,11 +1632,11 @@ def _try_solve_turnstile_via_solver(log_callback=None):
                 log_callback(f"[*] 页内求解异常: {str(exc)[:100]}")
         if token:
             try:
-                captcha_solver.inject_turnstile_token(page, token)
+                captcha_solver.inject_turnstile_token(cur_page, token)
             except Exception:
                 pass
             try:
-                captcha_solver.activate_turnstile_bridge(page, token)
+                captcha_solver.activate_turnstile_bridge(cur_page, token)
             except Exception:
                 pass
             try:
@@ -1531,8 +1652,7 @@ def _try_solve_turnstile_via_solver(log_callback=None):
 
 def _wait_for_turnstile(log_callback=None, cancel_callback=None, timeout=60):
     """等待 Turnstile 自动完成；自动失败则交给打码，最后才判超时。"""
-    global page
-    if page is None:
+    if _get_page() is None:
         raise Exception("页面未就绪，无法执行 Turnstile")
 
     timeout = max(float(timeout or 0), 0.0)
@@ -1789,10 +1909,11 @@ def inject_turnstile_token_into_react(token, log_callback=None):
 
     Returns the JS probe result string (useful for logs and tests).
     """
-    if page is None or not token:
+    cur_page = _get_page()
+    if cur_page is None or not token:
         return ""
     try:
-        result = page.run_js(_REACT_ONTOKEN_JS % json.dumps(str(token)))
+        result = cur_page.run_js(_REACT_ONTOKEN_JS % json.dumps(str(token)))
     except Exception as exc:
         if log_callback:
             log_callback(f"[*] Turnstile token 注入 React 失败: {type(exc).__name__}: {str(exc)[:140]}")
@@ -1812,8 +1933,9 @@ def _publish_solver_token_to_page_state(log_callback=None):
     原来的 fiber 注入（inject_turnstile_token_into_react）保留为兜底，但实测
     x.ai 页面在 Camoufox 下没有任何 React fiber 属性，它必然返回 no-react-root。
     """
+    cur_page = _get_page()
     try:
-        token = page.run_js(
+        token = cur_page.run_js(
             'try{var i=document.querySelector(\'input[name="cf-turnstile-response"]\');'
             'return i?String(i.value||""):"";}catch(e){return "";}'
         )
@@ -1826,7 +1948,7 @@ def _publish_solver_token_to_page_state(log_callback=None):
         return ""
     try:
         import captcha_solver
-        bridge = captcha_solver.activate_turnstile_bridge(page, token)
+        bridge = captcha_solver.activate_turnstile_bridge(cur_page, token)
         if log_callback:
             log_callback(f"[*] Turnstile 桥接结果: {str(bridge)[:180]}")
     except Exception as exc:
@@ -1842,8 +1964,9 @@ def fill_profile_and_submit(timeout=180, log_callback=None, cancel_callback=None
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        cur_page = _get_page()
         if not form_filled_once:
-            filled = page.run_js(
+            filled = cur_page.run_js(
                 """
 const givenName = arguments[0];
 const familyName = arguments[1];
@@ -1935,7 +2058,7 @@ return 'filled-no-submit';
                 deadline = max(deadline, time.time() + 60.0)
             continue
 
-        submit_state = page.run_js(
+        submit_state = cur_page.run_js(
             r"""
 function isVisible(node) {
     if (!node) return false;
@@ -1981,7 +2104,7 @@ return 'ready-to-submit';
             if log_callback:
                 log_callback(f"[拟人化] 提交注册前模拟人工核对 ({pre_submit_delay:.1f}s)...")
             sleep_with_cancel(pre_submit_delay, cancel_callback)
-            submit_state = page.run_js(
+            submit_state = cur_page.run_js(
                 r"""
 function isVisible(node) {
     if (!node) return false;
@@ -2035,15 +2158,15 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
         try:
-            refresh_active_page()
-            if page is None:
+            cur_page = refresh_active_page()
+            if cur_page is None:
                 sleep_with_cancel(1, cancel_callback)
                 continue
 
             # 仍停留在“完成注册”页时，若 Cloudflare 已通过，周期性重试点击提交
             now = time.time()
             if now - last_submit_retry >= 2.5:
-                retried = page.run_js(
+                retried = cur_page.run_js(
                     r"""
 const titleHit = !!Array.from(document.querySelectorAll('h1,h2,div,span')).find((el) => {
     const t = (el.textContent || '').replace(/\s+/g, '');
@@ -2081,7 +2204,7 @@ return titleHit ? 'final-page' : 'not-final-page';
                     _publish_solver_token_to_page_state(log_callback)
                     sleep_with_cancel(0.8, cancel_callback)
 
-                    retried = page.run_js(
+                    retried = cur_page.run_js(
                         r"""
 function isVisible(node) {
     if (!node) return false;
@@ -2130,7 +2253,7 @@ return 'final-page-clicked-submit';
                     final_no_submit_state = ""
                     final_no_submit_since = None
 
-            cookies = page.cookies(all_domains=True, all_info=True) or []
+            cookies = cur_page.cookies(all_domains=True, all_info=True) or []
             for item in cookies:
                 if isinstance(item, dict):
                     name = str(item.get("name", "")).strip()

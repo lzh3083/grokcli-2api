@@ -388,6 +388,12 @@ def remove_account(account_id: str) -> bool:
     _backup_auth_file()
     del data[matched]
     write_auth_map(data)  # PG primary (no auth.json mirror)
+    from grok2api.store import accounts_pg
+
+    if accounts_pg.enabled():
+        accounts_pg.delete_account(matched)
+        if account_id and account_id != matched:
+            accounts_pg.delete_account(account_id)
     _cleanup_account_side_state([matched, account_id])
     return True
 
@@ -412,6 +418,10 @@ def remove_accounts(account_ids: list[str]) -> dict:
     if removed:
         _backup_auth_file()
         write_auth_map(data)  # PG primary (no auth.json mirror)
+        from grok2api.store import accounts_pg
+
+        if accounts_pg.enabled():
+            accounts_pg.delete_accounts(removed)
         _cleanup_account_side_state(removed)
     return {
         "removed": removed,
@@ -425,24 +435,28 @@ def remove_accounts(account_ids: list[str]) -> dict:
 def clear_all_accounts() -> bool:
     """Clear every account from durable store (PostgreSQL, or auth.json in file mode)."""
     _backup_auth_file()
+    from grok2api.store import accounts_pg
+
+    pg_enabled = accounts_pg.enabled()
     try:
-        # Empty map → PG write_auth_map deletes all account + pool rows.
         write_auth_map({})
-    except Exception:
+    except Exception as exc:
+        if pg_enabled:
+            print(f"[accounts] clear_all_accounts write_auth_map failed: {exc}", file=sys.stderr)
+            return False
         # Fallback: try file-only wipe (file mode / PG unavailable)
         try:
             if AUTH_FILE.is_file():
                 AUTH_FILE.unlink()
         except OSError:
             return False
-    # Extra safety: direct PG wipe if write path partially failed
-    try:
-        from grok2api.store.accounts_pg import enabled as pg_on, write_auth_map as pg_write
-
-        if pg_on():
-            pg_write({})
-    except Exception:
-        pass
+    # Explicitly wipe all accounts and pool rows in PostgreSQL when enabled
+    if pg_enabled:
+        try:
+            accounts_pg.clear_all_accounts()
+        except Exception as exc:
+            print(f"[accounts] clear_all_accounts PG wipe failed: {exc}", file=sys.stderr)
+            return False
     try:
         from grok2api.admin.settings_store import save_account_pool_state
 

@@ -30,6 +30,7 @@ decommissioned; only the ``grokusercontent`` hop is still functional.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -426,7 +427,8 @@ class SSOExtractor:
                 if name == "sso":
                     val = str(getattr(cookie, "value", ""))
                     if self.debug:
-                        print(f"  [sso] extracted: {val[:60]}...")
+                        fp = hashlib.sha256(val.encode("utf-8")).hexdigest()[:8] if val else "none"
+                        print(f"  [sso] extracted: len={len(val)} sha256={fp}")
                     return val
         return None
 
@@ -491,6 +493,10 @@ def save_sso(
     filepath.write_text(
         json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    try:
+        os.chmod(filepath, 0o600)
+    except OSError:
+        pass
     return filepath
 
 

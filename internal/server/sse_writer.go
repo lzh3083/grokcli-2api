@@ -120,7 +120,9 @@ func (s *sseWriter) WriteBytes(payload []byte, force bool) error {
 		}
 		return err
 	}
-	s.flusher.Flush()
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
 	s.lastOK = true
 	streamWritesTotal.Add(1)
 	streamBytesTotal.Add(uint64(len(payload)))

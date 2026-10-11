@@ -10,6 +10,7 @@ scripts/sso_to_auth_json.py.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -46,6 +47,8 @@ def _account_sso_value(entry: dict) -> str:
 # ── SSO import jobs (progress polling across multi-worker via Redis) ───────
 
 _SSO_JOB_TTL_SEC = 3600
+_SSO_JOBS_MAX_LOCAL = 200
+_SSO_TERMINAL_STATUSES = frozenset({"done", "completed", "failed", "error", "cancelled", "canceled", "stopped"})
 _sso_jobs_lock = threading.Lock()
 _sso_jobs_local: dict[str, dict[str, Any]] = {}
 
@@ -59,10 +62,40 @@ def _sso_job_key(job_id: str) -> str:
         return f"g2a:sso_import:job:{job_id}"
 
 
+def _prune_sso_jobs_local_locked() -> None:
+    if len(_sso_jobs_local) <= _SSO_JOBS_MAX_LOCAL:
+        return
+    now = time.time()
+    # First evict expired jobs older than _SSO_JOB_TTL_SEC
+    expired_keys = [
+        k for k, v in _sso_jobs_local.items()
+        if (now - float(v.get("updated_at") or v.get("created_at") or 0.0)) > _SSO_JOB_TTL_SEC
+        and (str(v.get("status") or "").lower() in _SSO_TERMINAL_STATUSES or v.get("finished_at"))
+    ]
+    for k in expired_keys:
+        _sso_jobs_local.pop(k, None)
+    if len(_sso_jobs_local) <= _SSO_JOBS_MAX_LOCAL:
+        return
+    # Evict oldest finished jobs by updated_at (never evict non-terminal running jobs)
+    finished_items = sorted(
+        (
+            (float(v.get("updated_at") or v.get("created_at") or 0.0), k)
+            for k, v in _sso_jobs_local.items()
+            if str(v.get("status") or "").lower() in _SSO_TERMINAL_STATUSES or v.get("finished_at")
+        ),
+        key=lambda x: x[0],
+    )
+    for _ts, k in finished_items:
+        if len(_sso_jobs_local) <= _SSO_JOBS_MAX_LOCAL:
+            break
+        _sso_jobs_local.pop(k, None)
+
+
 def _sso_job_put(job_id: str, job: dict[str, Any]) -> None:
     payload = dict(job)
     with _sso_jobs_lock:
         _sso_jobs_local[job_id] = payload
+        _prune_sso_jobs_local_locked()
     try:
         from grok2api.store.redis_client import set_json
 
@@ -173,6 +206,10 @@ def _persist_import_sso_backup(*, email: str = "", sso: str = "", source: str = 
     try:
         root = Path(getattr(_config, "DATA_DIR", Path(__file__).resolve().parents[2] / "data")) / "import_sso"
         root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(root, 0o700)
+        except OSError:
+            pass
         ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         safe_email = "".join(
             ch if ch.isalnum() or ch in "._@+-" else "_"
@@ -187,6 +224,10 @@ def _persist_import_sso_backup(*, email: str = "", sso: str = "", source: str = 
             "created_at": ts,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return str(path)
     except Exception as e:  # noqa: BLE001
         print(f"[sso-import] WARN: save SSO backup failed: {e}")

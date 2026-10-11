@@ -9,19 +9,27 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_SERVICE="${GROKCLI_APP_SERVICE:-grokcli-2api}"
-# Default health port matches docker-compose.yml (override via env / compose override)
-# Prefer compose override / .env port when present; fall back to 40081 (current deploy default).
-if [[ -z "${GROKCLI_HEALTH_PORT:-}" ]]; then
-  if [[ -f .env ]] && grep -qE '^GROK2API_PORT=' .env; then
-    HEALTH_PORT="$(grep -E '^GROK2API_PORT=' .env | head -1 | cut -d= -f2- | tr -d "\"'")"
+if [[ ! -f .env ]]; then
+  if [[ -f .env.example ]]; then
+    cp .env.example .env
   else
-    HEALTH_PORT=40081
+    touch .env
   fi
-else
-  HEALTH_PORT="${GROKCLI_HEALTH_PORT}"
 fi
-HEALTH_PORT="${HEALTH_PORT:-40081}"
+
+APP_SERVICE="${GROKCLI_APP_SERVICE:-grokcli-2api}"
+# Default health port matches docker-compose.yml (${GROK2API_PORT:-3000}).
+if [[ -n "${GROKCLI_HEALTH_PORT:-}" ]]; then
+  HEALTH_PORT="${GROKCLI_HEALTH_PORT}"
+elif [[ -n "${GROK2API_PORT:-}" ]]; then
+  HEALTH_PORT="${GROK2API_PORT}"
+elif [[ -f .env ]] && grep -qE '^[[:space:]]*GROK2API_PORT=' .env; then
+  HEALTH_PORT="$(grep -E '^[[:space:]]*GROK2API_PORT=' .env | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//' | tr -d "\"'[:space:]")"
+else
+  HEALTH_PORT=3000
+fi
+HEALTH_PORT="${HEALTH_PORT:-3000}"
+export GROK2API_PORT="${GROK2API_PORT:-${HEALTH_PORT}}"
 HEALTH_URL="${GROKCLI_HEALTH_URL:-http://127.0.0.1:${HEALTH_PORT}/health}"
 
 echo "== git =="

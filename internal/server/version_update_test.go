@@ -103,3 +103,30 @@ func TestInContainerUpdateScriptFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeUpdateImageEnforcesRepository(t *testing.T) {
+	t.Setenv("GROK2API_GHCR_IMAGE", "")
+	t.Setenv("GROK2API_ALLOW_CUSTOM_UPDATE_IMAGE", "")
+
+	// Default empty or matching repo (with or without tag) should pass.
+	img, err := sanitizeUpdateImage("")
+	if err != nil || img != defaultGHCRImage {
+		t.Fatalf("empty image got=%q err=%v", img, err)
+	}
+	img, err = sanitizeUpdateImage("ghcr.io/lzh3083/grokcli-2api:v2.0.9")
+	if err != nil || img != defaultGHCRImage {
+		t.Fatalf("matching repo with tag got=%q err=%v", img, err)
+	}
+
+	// Untrusted third-party repository must be rejected by default.
+	if _, err := sanitizeUpdateImage("evil.example.com/attacker/backdoor:latest"); err == nil {
+		t.Fatal("expected third-party image repository to be rejected")
+	}
+
+	// Custom update image allowed only when GROK2API_ALLOW_CUSTOM_UPDATE_IMAGE=1.
+	t.Setenv("GROK2API_ALLOW_CUSTOM_UPDATE_IMAGE", "1")
+	img, err = sanitizeUpdateImage("registry.internal:5000/custom/grok2api:v1.2.3")
+	if err != nil || img != "registry.internal:5000/custom/grok2api" {
+		t.Fatalf("custom image with allow=1 got=%q err=%v", img, err)
+	}
+}

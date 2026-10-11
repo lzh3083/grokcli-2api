@@ -14,7 +14,12 @@ Config is stored under settings key ``sub2api_config``.
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import json
+import os
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -56,13 +61,155 @@ def _default_config() -> dict[str, Any]:
     }
 
 
+def _allow_private_integration_urls() -> bool:
+    return str(os.environ.get("GROK2API_ALLOW_PRIVATE_INTEGRATION_URLS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _is_forbidden_resolved_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address, *, is_public_domain: bool) -> bool:
+    ip_str = str(ip_obj)
+    if (
+        ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or ip_obj.is_reserved
+        or ip_str in ("169.254.169.254", "100.100.100.200")
+    ):
+        return True
+    if is_public_domain and not _allow_private_integration_urls():
+        if ip_obj.is_loopback or ip_obj.is_private:
+            return True
+    return False
+
+
+def _resolve_and_validate_target(host: str, port: int) -> str:
+    clean_host = (host or "").strip().strip("[]").lower()
+    if not clean_host:
+        raise ValueError("empty hostname in URL")
+    if clean_host in ("169.254.169.254", "metadata.google.internal", "metadata.tencentyun.com", "100.100.100.200"):
+        raise ValueError(f"disallowed cloud metadata host: {clean_host}")
+    try:
+        literal_ip = ipaddress.ip_address(clean_host)
+    except ValueError:
+        literal_ip = None
+
+    if literal_ip is not None:
+        if _is_forbidden_resolved_ip(literal_ip, is_public_domain=False):
+            raise ValueError(f"disallowed target IP in base_url: {clean_host}")
+        return str(literal_ip)
+
+    is_public_domain = "." in clean_host and clean_host != "localhost" and not clean_host.endswith(
+        (".local", ".internal", ".lan", ".docker")
+    )
+    infos = socket.getaddrinfo(clean_host, port or 80, type=socket.SOCK_STREAM)
+    if not infos:
+        raise ValueError(f"unable to resolve hostname: {clean_host}")
+    validated_ip = ""
+    for info in infos:
+        ip_str = info[4][0].split("%", 1)[0]
+        ip_resolved = ipaddress.ip_address(ip_str)
+        if _is_forbidden_resolved_ip(ip_resolved, is_public_domain=is_public_domain):
+            raise ValueError(f"disallowed address resolved for {clean_host}: {ip_str}")
+        if not validated_ip:
+            validated_ip = ip_str
+    return validated_ip
+
+
+def _validate_http_url(url: str) -> str:
+    raw = str(url or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("base_url must use http or https scheme with a valid hostname")
+    if parsed.username is not None or parsed.password is not None or "@" in (parsed.netloc or ""):
+        raise ValueError("base_url must not contain userinfo (username/password)")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("base_url contains an invalid port") from exc
+    if port is not None and not (1 <= int(port) <= 65535):
+        raise ValueError(f"base_url port out of range: {port}")
+    host = parsed.hostname.strip().lower()
+    if host in ("169.254.169.254", "metadata.google.internal", "metadata.tencentyun.com", "100.100.100.200"):
+        raise ValueError(f"disallowed cloud metadata host in base_url: {host}")
+    try:
+        _resolve_and_validate_target(host, port or (443 if parsed.scheme.lower() == "https" else 80))
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    return raw
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        validated_ip = _resolve_and_validate_target(self.host, self.port or 80)
+        self.sock = socket.create_connection(
+            (validated_ip, self.port or 80), self.timeout, self.source_address
+        )
+        if getattr(self, "_tunnel_host", None):
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        validated_ip = _resolve_and_validate_target(self.host, self.port or 443)
+        sock = socket.create_connection(
+            (validated_ip, self.port or 443), self.timeout, self.source_address
+        )
+        if getattr(self, "_tunnel_host", None):
+            self.sock = sock
+            self._tunnel()
+        server_hostname = self._tunnel_host if getattr(self, "_tunnel_host", None) else self.host
+        self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        orig = urllib.parse.urlparse(req.full_url)
+        dest = urllib.parse.urlparse(newurl)
+        if dest.scheme.lower() not in ("http", "https") or not dest.hostname:
+            raise urllib.error.URLError(f"redirect to disallowed URL scheme: {dest.scheme}")
+        if (orig.scheme.lower(), orig.netloc.lower()) != (
+            dest.scheme.lower(),
+            dest.netloc.lower(),
+        ):
+            raise urllib.error.URLError("cross-origin redirect blocked to protect Authorization header")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(
+    _PinnedHTTPHandler,
+    _PinnedHTTPSHandler(context=ssl.create_default_context()),
+    _SafeRedirectHandler,
+)
+
+
 def _normalize_config(raw: Any, *, include_secrets: bool = True) -> dict[str, Any]:
     base = _default_config()
     if not isinstance(raw, dict):
         return base
     out = dict(base)
     out["enabled"] = bool(raw.get("enabled", False))
-    out["base_url"] = str(raw.get("base_url") or raw.get("url") or "").strip().rstrip("/")
+    raw_base_url = str(raw.get("base_url") or raw.get("url") or "").strip().rstrip("/")
+    if raw_base_url:
+        raw_base_url = _validate_http_url(raw_base_url)
+    out["base_url"] = raw_base_url
     out["email"] = str(raw.get("email") or raw.get("username") or "").strip()
     pw = raw.get("password")
     if include_secrets:
@@ -189,7 +336,9 @@ def public_sub2api_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _urljoin(base: str, path: str) -> str:
-    base = (base or "").rstrip("/")
+    base = _validate_http_url(base)
+    if not base:
+        raise ValueError("base_url is required")
     if not path.startswith("/"):
         path = "/" + path
     return base + path
@@ -203,6 +352,7 @@ def _http_json(
     body: Any = None,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> tuple[int, Any, str]:
+    _validate_http_url(url)
     data = None
     hdrs = {
         "Accept": "application/json",
@@ -215,7 +365,7 @@ def _http_json(
         hdrs["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _SAFE_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             status = int(getattr(resp, "status", 200) or 200)
             try:

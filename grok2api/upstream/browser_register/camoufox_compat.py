@@ -679,14 +679,8 @@ class CamoufoxOptions:
             parsed = parse_proxy(self._proxy)
             if parsed:
                 opts["proxy"] = parsed
-        # 时区走进程级 TZ（Firefox 启动时自然继承）。这里刻意不使用 Camoufox 的
-        # env= 参数：它语义不明，可能整包替换启动环境，把 DISPLAY 一起弄丢。
-        if self._timezone:
-            os.environ["TZ"] = self._timezone
-            try:
-                time.tzset()
-            except Exception:
-                pass
+        # 不在此处修改父进程全局 os.environ["TZ"] 或调用 time.tzset()，
+        # 以避免并发注册会话之间相互覆盖进程级时区。
         # 默认省流量首选项：禁用网页外置字体、遥测上报与自动更新
         default_prefs = {
             "browser.display.use_document_fonts": 0,
@@ -873,20 +867,34 @@ class CamoufoxBrowser:
 
         launch_opts = self._options.to_launch_options()
         self._camoufox = Camoufox(**launch_opts)
-        handle = self._camoufox.start()
-        self._playwright = getattr(self._camoufox, "_playwright", None)
-        # Camoufox 视 persistent_context 返回 BrowserContext，否则返回 Browser
-        if hasattr(handle, "new_context") and hasattr(handle, "contexts"):
-            self._browser = handle
-            self._context = handle.contexts[0] if handle.contexts else handle.new_context()
-        else:
-            self._context = handle
-            self._browser = getattr(handle, "browser", None)
-        self._user_data_path = (
-            getattr(handle, "user_data_dir", None)
-            or self._options.user_data_path
-            or ""
-        )
+        try:
+            handle = self._camoufox.start()
+            self._playwright = getattr(self._camoufox, "_playwright", None)
+            # Camoufox 视 persistent_context 返回 BrowserContext，否则返回 Browser
+            if hasattr(handle, "new_context") and hasattr(handle, "contexts"):
+                self._browser = handle
+                if handle.contexts:
+                    self._context = handle.contexts[0]
+                else:
+                    ctx_kwargs = {}
+                    if self._options.timezone:
+                        ctx_kwargs["timezone_id"] = self._options.timezone
+                    try:
+                        self._context = handle.new_context(**ctx_kwargs)
+                    except Exception:
+                        self._context = handle.new_context()
+            else:
+                self._context = handle
+                self._browser = getattr(handle, "browser", None)
+            self._user_data_path = (
+                getattr(handle, "user_data_dir", None)
+                or self._options.user_data_path
+                or ""
+            )
+        except Exception:
+            self._playwright = getattr(self._camoufox, "_playwright", None)
+            self.quit(del_data=True)
+            raise
         # 每个页面加载前安装 Turnstile 垫片，详见 _TURNSTILE_SHIM_JS 的说明。
         try:
             self._context.add_init_script(_TURNSTILE_SHIM_JS)
@@ -993,13 +1001,20 @@ class CamoufoxBrowser:
         return tabs[-1] if tabs else self.new_tab()
 
     def quit(self, del_data: bool = False, **kwargs):
+        pw = self._playwright or getattr(self._camoufox, "_playwright", None)
         try:
             if self._camoufox is not None:
                 self._camoufox.__exit__(None, None, None)
         except Exception:
             pass
+        try:
+            if pw is not None:
+                pw.stop()
+        except Exception:
+            pass
         finally:
             self._camoufox = None
+            self._playwright = None
             self._browser = None
             self._context = None
             self._pages = []

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -78,9 +79,22 @@ func defaultHTTPClient() *http.Client {
 	}
 }
 
+var (
+	sharedHTTPOnce   sync.Once
+	sharedHTTPClient *http.Client
+)
+
+func getSharedHTTPClient() *http.Client {
+	sharedHTTPOnce.Do(func() {
+		sharedHTTPClient = defaultHTTPClient()
+	})
+	return sharedHTTPClient
+}
+
 func (c *Client) Open(ctx context.Context, account Account, model string, body map[string]any) (*http.Response, error) {
-	if c.HTTP == nil {
-		c.HTTP = defaultHTTPClient()
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = getSharedHTTPClient()
 	}
 	// CPA / cli-chat-proxy cache path: always call /responses (not /chat/completions).
 	// Convert chat-style body → responses body, then bridge SSE back to chat chunks
@@ -109,7 +123,7 @@ func (c *Client) Open(ctx context.Context, account Account, model string, body m
 	for name, value := range c.Headers(account.Token, model, convID) {
 		request.Header.Set(name, value)
 	}
-	response, err := c.HTTP.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -161,13 +175,29 @@ func (c *Client) Headers(token, model string, convID ...string) map[string]strin
 	_ = model
 	id := ""
 	if len(convID) > 0 {
-		id = strings.TrimSpace(convID[0])
+		id = sanitizeConvID(convID[0])
 	}
 	if id != "" {
 		// CPA sets both casings; Go Header.Set canonicalizes keys.
 		out["x-grok-conv-id"] = id
 	}
 	return out
+}
+
+func sanitizeConvID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	for i := 0; i < len(raw) && b.Len() < 128; i++ {
+		ch := raw[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+			ch == '-' || ch == '_' || ch == '.' || ch == ':' {
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
 }
 
 // extractConvID picks a stable session/cache key from the upstream body for
@@ -184,7 +214,9 @@ func extractConvID(body map[string]any) string {
 		"session_id",
 	} {
 		if value, _ := body[key].(string); strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+			if clean := sanitizeConvID(value); clean != "" {
+				return clean
+			}
 		}
 	}
 	// Claude Code often only has the conversation id inside metadata.user_id /
@@ -193,17 +225,19 @@ func extractConvID(body map[string]any) string {
 	if meta, _ := body["metadata"].(map[string]any); meta != nil {
 		for _, key := range []string{"prompt_cache_key", "session_id", "sessionId", "thread_id", "conversation_id"} {
 			if value, _ := meta[key].(string); strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value)
+				if clean := sanitizeConvID(value); clean != "" {
+					return clean
+				}
 			}
 		}
-		if sid := claudeCodeSessionFromUser(stringField(meta, "user_id")); sid != "" {
+		if sid := sanitizeConvID(claudeCodeSessionFromUser(stringField(meta, "user_id"))); sid != "" {
 			return sid
 		}
 	}
-	if sid := claudeCodeSessionFromUser(stringField(body, "user")); sid != "" {
+	if sid := sanitizeConvID(claudeCodeSessionFromUser(stringField(body, "user"))); sid != "" {
 		return sid
 	}
-	if sid := claudeCodeSessionFromUser(stringField(body, "user_id")); sid != "" {
+	if sid := sanitizeConvID(claudeCodeSessionFromUser(stringField(body, "user_id"))); sid != "" {
 		return sid
 	}
 	return ""
@@ -243,8 +277,8 @@ func stringField(m map[string]any, key string) string {
 func ReadSSE(reader io.Reader, emit func(Event) error) error {
 	scanner := bufio.NewScanner(reader)
 	// Dense thinking / multi-tool turns produce large SSE lines (tool args).
-	// 128KiB initial / 8MiB max reduces re-allocation on long payloads.
-	scanner.Buffer(make([]byte, 128<<10), 8<<20)
+	// 128KiB initial / 16MiB max reduces re-allocation on long payloads.
+	scanner.Buffer(make([]byte, 128<<10), 16<<20)
 
 	// Common case: one "data: {...}" line per event. Avoid strings.Join + Text()
 	// by scanning bytes and copying only the payload we keep until flush.

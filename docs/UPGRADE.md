@@ -32,43 +32,53 @@ cp .env.example .env
 # GROK2API_REQUIRE_SHARED_STORES=1
 ```
 
-### 3. 启动依赖并迁移
+### 3. 启动依赖并执行 Schema 迁移与数据导入
 
-**推荐（包装脚本）：**
+> 说明：旧版 Python 脚本 `scripts/migrate_json_to_pg.py` 已废弃移除。当前 2.x 版本统一使用 Go 迁移工具 `bin/grok2api-migrate` 执行数据库表结构迁移（Docker 容器 `entrypoint.sh` 启动时也会自动执行 `grok2api-migrate up`），旧版 `data/auth.json` 等文件数据可通过管理后台导入。
+
+**方式一：Docker Compose 启动自动迁移（推荐）**
+
+```bash
+# 容器启动时 entrypoint.sh 会自动执行 /app/bin/grok2api-migrate -dir migrations up
+docker compose up -d
+```
+
+**方式二：使用升级辅助脚本或手动运行 `bin/grok2api-migrate`**
 
 ```bash
 chmod +x scripts/upgrade_from_file_backend.sh
 ./scripts/upgrade_from_file_backend.sh --data-dir ./data
 ```
 
-**或手动：**
+或手动执行 Schema 迁移：
 
 ```bash
 docker compose up -d redis postgres
-# postgres/redis 默认不映射宿主机端口；迁移容器走 compose 内网服务名
-# 等待 postgres healthy 后：
-docker compose run --rm \
+# 容器内执行迁移：
+docker compose run --rm --no-deps \
   -e DATABASE_URL=postgresql://grok2api:grok2api@postgres:5432/grok2api \
   grokcli-2api \
-  python scripts/migrate_json_to_pg.py --data-dir /app/data --merge-pool
-# 根目录 `python migrate_json_to_pg.py` 仍可用（兼容包装）
+  /app/bin/grok2api-migrate -dir /app/migrations up
 ```
 
-本地非 Docker（需本机已有可连的 Postgres，或临时在 override 里映射端口）：
+本地非 Docker 环境（需本机已有可连接的 PostgreSQL）：
 
 ```bash
-pip install -r requirements.txt -r requirements-store.txt
 export DATABASE_URL=postgresql://grok2api:grok2api@127.0.0.1:5432/grok2api
-python scripts/migrate_json_to_pg.py --data-dir ./data --merge-pool
-# 或：python migrate_json_to_pg.py --data-dir ./data --merge-pool
+./bin/grok2api-migrate -dir ./migrations up
+./bin/grok2api-migrate -dir ./migrations verify
 ```
 
-### 4. 启动应用
+### 4. 启动应用并导入旧 JSON 数据
 
 ```bash
 docker compose up -d
-curl -fsS http://127.0.0.1:3000/health
+curl -fsS "http://127.0.0.1:${GROK2API_PORT:-3000}/health"
 ```
+
+启动后登录管理后台（`http://127.0.0.1:${GROK2API_PORT:-3000}/admin`，默认端口 `3000`）：
+- 在 **「账号管理」→「批量导入」** 中上传或粘贴原 `data/auth.json` 中的账号凭证数据完成导入；
+- 在 **「API Keys」** 页面重新创建或管理调用令牌。
 
 ### 5. 验证
 
@@ -119,7 +129,7 @@ docker compose pull   # 若用 GHCR
 # 或
 docker compose build
 docker compose up -d
-curl -fsS http://127.0.0.1:3000/health || curl -fsS http://127.0.0.1:40081/health
+curl -fsS "http://127.0.0.1:${GROK2API_PORT:-3000}/health"
 ```
 
 Docker 入口会自动跑 `grok2api-migrate up`（≥2.0.1）。Go 进程本身只校验 schema、不改表结构。
@@ -174,18 +184,18 @@ from grok2api.store.pg import connection
 ## 相关命令速查
 
 ```bash
-# dry-run 查看将导入什么（推荐路径）
-python scripts/migrate_json_to_pg.py --data-dir ./data --dry-run
+# 查看 SQL 迁移状态（只读，不修改数据库）
+./bin/grok2api-migrate -dir ./migrations status
+# 或使用包装脚本：
+./scripts/upgrade_from_file_backend.sh --status
 
-# 只导入账号，跳过 keys
-python scripts/migrate_json_to_pg.py --data-dir ./data --skip-keys --merge-pool
+# 执行 SQL 迁移并校验 checksum
+./bin/grok2api-migrate -dir ./migrations up
+./bin/grok2api-migrate -dir ./migrations verify
 
-# 根目录包装仍兼容旧命令
-python migrate_json_to_pg.py --data-dir ./data --dry-run
-
-# 健康与存储
-curl -s http://127.0.0.1:3000/health | jq .
-curl -s http://127.0.0.1:3000/metrics | head
+# 健康与存储检查
+curl -s "http://127.0.0.1:${GROK2API_PORT:-3000}/health" | jq .
+curl -s "http://127.0.0.1:${GROK2API_PORT:-3000}/metrics" | head
 ```
 
 
@@ -208,7 +218,7 @@ docker exec grokcli-2api /app/bin/grok2api-migrate -dir /app/migrations verify
 
 # 重启
 docker restart grokcli-2api
-curl -fsS http://127.0.0.1:3000/health || curl -fsS http://127.0.0.1:40081/health
+curl -fsS "http://127.0.0.1:${GROK2API_PORT:-3000}/health"
 ```
 
 新部署用 `docker compose up -d` 即可；入口默认 `GROK2API_AUTO_MIGRATE=1`。
