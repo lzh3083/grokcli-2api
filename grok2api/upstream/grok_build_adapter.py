@@ -3073,6 +3073,8 @@ def _run_registration(
             session_cookies = bres.get("session_cookies") or {"sso": sso, "sso-rw": sso}
             sess["sso"] = sso
             sess["sso_attempts"] = ["browser_engine"]
+            if bres.get("device_code"):
+                sess["device_code"] = bres["device_code"]
         else:
             ensure_xconsole()
             from xconsole_client import (
@@ -3647,19 +3649,17 @@ def _run_registration(
                     if sso:
                         sso_attempts.append("parse_set_cookie_or_rsc")
                     if not sso and rsc_body:
+                        _cand_urls = parse_all_set_cookie_urls(rsc_body)
+                        _prim_url = parse_sso_jwt_url(rsc_body)
                         print(
-                            f"[grok-build-auth] set-cookie candidates="
-                            f"{parse_all_set_cookie_urls(rsc_body)[:3]}"
-                        )
-                        print(
-                            f"[grok-build-auth] primary set-cookie url="
-                            f"{parse_sso_jwt_url(rsc_body)}"
+                            f"[grok-build-auth] set-cookie candidate count={len(_cand_urls)}"
+                            f" has_primary={bool(_prim_url)}"
                         )
                         extractor = SSOExtractor(
                             transport_request=client._request,
                             base_headers=client._base_headers,
                             cookie_jar=client._t.cookies,
-                            debug=True,
+                            debug=False,
                         )
                         sso = extractor.extract(
                             rsc_body, email=email, password=password, save=False
@@ -3864,32 +3864,46 @@ def _run_registration(
                 conv_proxy = None
 
         token = None
-        max_df_tries = 4
-        df_backoffs = (5.0, 8.0, 12.0)
-        for _df_try in range(max_df_tries):
-            if _df_try > 0:
-                # On retry, fallback to direct connection if proxy failed on first try
-                conv_proxy = None
-                wait_sec = df_backoffs[_df_try - 1] if _df_try - 1 < len(df_backoffs) else 10.0
-                update(
-                    "importing",
-                    f"SSO obtained; waiting {wait_sec}s for xAI session sync before retry {_df_try + 1}/{max_df_tries} [{ADAPTER_BUILD}]",
-                )
-                time.sleep(wait_sec)
+        # 若在注册浏览器生命周期内已预先完成设备授权，直接优先提取 Token
+        pre_dc = sess.get("device_code")
+        if pre_dc:
             try:
-                token = sso_import.sso_to_token(sso, proxy=conv_proxy)
-            except Exception as _dfe:
-                print(f"[grok-build-auth] WARN: sso_to_token attempt {_df_try + 1} error: {_dfe}", flush=True)
+                print(f"[grok-build-auth] Polling token using pre-authorized device_code...", flush=True)
+                token = sso_import.poll_token(pre_dc, 1, 1800, timeout=20)
+                if token and token.get("access_token"):
+                    print(f"[grok-build-auth] [+] Pre-authorized token successfully acquired!", flush=True)
+            except Exception as _pde:
+                print(f"[grok-build-auth] WARN: poll pre-authorized device code failed: {_pde}", flush=True)
                 token = None
-            if token and token.get("access_token"):
-                break
+
+        if not token or not token.get("access_token"):
+            max_df_tries = 4
+            df_backoffs = (5.0, 8.0, 12.0)
+            for _df_try in range(max_df_tries):
+                if _df_try > 0:
+                    # On retry, fallback to direct connection if proxy failed on first try
+                    conv_proxy = None
+                    wait_sec = df_backoffs[_df_try - 1] if _df_try - 1 < len(df_backoffs) else 10.0
+                    update(
+                        "importing",
+                        f"SSO obtained; waiting {wait_sec}s for xAI session sync before retry {_df_try + 1}/{max_df_tries} [{ADAPTER_BUILD}]",
+                    )
+                    time.sleep(wait_sec)
+                try:
+                    token = sso_import.sso_to_token(sso, proxy=conv_proxy)
+                except Exception as _dfe:
+                    print(f"[grok-build-auth] WARN: sso_to_token attempt {_df_try + 1} error: {_dfe}", flush=True)
+                    token = None
+                if token and token.get("access_token"):
+                    break
         if not token or not token.get("access_token"):
             _note_reg_pressure("device-flow conversion failed", pause_sec=10)
+            _sso_fp = hashlib.sha256(sso.encode("utf-8")).hexdigest()[:8] if sso else "none"
             raise RuntimeError(
                 "SSO obtained but sso_to_auth_json conversion failed "
                 "(device verify/approve/token poll; often xAI device-flow "
                 "rate_limited/slow_down under concurrent registration). "
-                f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
+                f"adapter_build={ADAPTER_BUILD}; sso_fp={_sso_fp} (len={len(sso)})"
             )
         _key, entry = sso_import.token_to_auth_entry(token, email=email)
         import_payload: dict[str, Any] = {

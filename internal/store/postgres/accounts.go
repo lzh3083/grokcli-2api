@@ -1817,7 +1817,7 @@ func (c *Connector) ListAccountAuthsForProbe(ctx context.Context, limit int, exc
 			    WHEN ap.last_probe_status = 'fail' THEN 1
 			    ELSE 2
 			  END ASC,
-			  COALESCE((ap.last_probe->>'probed_at')::bigint, 0) ASC,
+			  COALESCE((ap.last_probe->>'probed_at')::double precision, 0) ASC,
 			  a.updated_at ASC
 			LIMIT $1`, limit)
 	} else {
@@ -1833,7 +1833,7 @@ func (c *Connector) ListAccountAuthsForProbe(ctx context.Context, limit int, exc
 			    WHEN ap.last_probe_status = 'fail' THEN 1
 			    ELSE 2
 			  END ASC,
-			  COALESCE((ap.last_probe->>'probed_at')::bigint, 0) ASC,
+			  COALESCE((ap.last_probe->>'probed_at')::double precision, 0) ASC,
 			  a.updated_at ASC
 			LIMIT $1`, limit, ex)
 	}

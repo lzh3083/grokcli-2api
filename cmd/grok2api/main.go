@@ -16,6 +16,7 @@ import (
 	"github.com/hm2899/grokcli-2api/internal/auth"
 	"github.com/hm2899/grokcli-2api/internal/buildinfo"
 	"github.com/hm2899/grokcli-2api/internal/config"
+	"github.com/hm2899/grokcli-2api/internal/egress"
 	"github.com/hm2899/grokcli-2api/internal/maintainer"
 	"github.com/hm2899/grokcli-2api/internal/modelhealth"
 	"github.com/hm2899/grokcli-2api/internal/models"
@@ -164,9 +165,26 @@ func main() {
 
 	// Live config pointer so admin settings writes hot-reload without restart.
 	runtimeCfg := cfg
+	egressMgr := egress.NewManager()
 	if store != nil {
 		if settings, err := store.PublicSettings(context.Background()); err == nil {
 			runtimeCfg.ApplyStoreSettings(settings)
+			if obCfg, ok := settings["outbound_proxy_config"].(map[string]any); ok {
+				proxyText, _ := obCfg["proxy"].(string)
+				pUser, _ := obCfg["proxy_username"].(string)
+				pPass, _ := obCfg["proxy_password"].(string)
+				egressMgr.LoadFromConfig(proxyText, pUser, pPass)
+				if auths, err := store.ListAccountAuths(context.Background(), 5000, false); err == nil && len(auths) > 0 {
+					var ids []string
+					for _, a := range auths {
+						ids = append(ids, a.ID)
+					}
+					egressMgr.PrebindAccounts(ids)
+				}
+			}
+			if healthSvc != nil {
+				healthSvc.SetEgress(egressMgr)
+			}
 			// Hot knobs for model health (interval/batch/workers) from durable settings.
 			if healthSvc != nil {
 				var intervalSec float64
@@ -196,6 +214,29 @@ func main() {
 					workers = int(v)
 				}
 				healthSvc.Configure(intervalSec, batch, workers)
+				candyEnabled, candyOk := settings["candy_eval_enabled"].(bool)
+				if !candyOk {
+					candyEnabled = true
+				}
+				var candyIntervalSec float64
+				switch v := settings["candy_eval_interval_sec"].(type) {
+				case float64:
+					candyIntervalSec = v
+				case int:
+					candyIntervalSec = float64(v)
+				case int64:
+					candyIntervalSec = float64(v)
+				}
+				var candyCooldownHours int
+				switch v := settings["candy_eval_cooldown_hours"].(type) {
+				case int:
+					candyCooldownHours = v
+				case int64:
+					candyCooldownHours = int(v)
+				case float64:
+					candyCooldownHours = int(v)
+				}
+				healthSvc.ConfigureCandy(&candyEnabled, candyIntervalSec, candyCooldownHours)
 				if pm, ok := settings["probe_models"]; ok {
 					var pms []string
 					switch v := pm.(type) {
@@ -298,6 +339,7 @@ func main() {
 		Maintainer:        maintSvc,
 		ModelHealth:       healthSvc,
 		Quota:             quota.New(store, cfg.UpstreamBase),
+		EgressManager:     egressMgr,
 		Config:            cfg,
 		RuntimeConfig:     &runtimeCfg,
 		RegistrationURL:   cfg.RegistrationServiceURL,

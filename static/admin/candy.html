@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>
+  (function () {
+    var KEY = "g2a_asset_reload_at";
+    function reloadedRecently() {
+      try { return (Date.now() - Number(sessionStorage.getItem(KEY) || 0)) < 60000; } catch (e) { return false; }
+    }
+    function markReload() {
+      try { sessionStorage.setItem(KEY, String(Date.now())); } catch (e) {}
+    }
+    window.__g2aScriptFailed = function (el) {
+      console.error("static script failed", el && el.src);
+      if (!reloadedRecently()) {
+        markReload();
+        var u = new URL(location.href);
+        u.searchParams.set("_g2a_cb", String(Date.now()));
+        location.replace(u.pathname + u.search);
+        return;
+      }
+      var d = document.getElementById("boot-desc") || document.getElementById("boot-hint");
+      if (d) d.textContent = "静态资源加载失败，请点击重试";
+    };
+    window.__g2aBootLogin = function () {
+      function show(msg) {
+        try {
+          var boot = document.getElementById("boot-view");
+          var auth = document.getElementById("auth-view");
+          if (boot) boot.classList.remove("hidden");
+          if (auth) auth.classList.add("hidden");
+          var d = document.getElementById("boot-desc");
+          var h = document.getElementById("boot-hint");
+          if (d) d.textContent = "页面脚本未就绪";
+          if (h) h.innerHTML = (msg || "") +
+            '<br><button type="button" class="g2a-btn g2a-btn-primary" style="margin-top:12px" id="g2a-reload-btn">重试</button>';
+          var b = document.getElementById("g2a-reload-btn");
+          if (b) b.onclick = function () {
+            try { sessionStorage.removeItem(KEY); } catch (e) {}
+            location.replace(location.pathname + "?_g2a_cb=" + Date.now());
+          };
+        } catch (e) {}
+      }
+      var tries = 0;
+      function attempt() {
+        tries += 1;
+        if (window.G2A && typeof G2A.api === "function" && G2A.auth && typeof G2A.auth.initLoginPage === "function") {
+          try { G2A.auth.initLoginPage(); } catch (e) { show(String(e && e.message || e)); }
+          return;
+        }
+        if (tries < 20) { setTimeout(attempt, 50); return; }
+        show("登录脚本加载不完整。点击重试。");
+      }
+      attempt();
+    };
+  })();
+  </script>
+
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("g2a_theme");
+        if (t !== "light" && t !== "dark") {
+          t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.classList.add(t === "dark" ? "theme-dark" : "theme-light");
+      } catch (e) {}
+    })();
+  </script>
+
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>糖果测智 · grokcli-2api</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <link rel="stylesheet" href="/static/dist/admin-antd.305cf77762.css" />
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon" />
+</head>
+<body class="g2a-body" data-page="candy">
+  <div id="toast" class="g2a-message"></div>
+  <div class="g2a-layout" id="main-view">
+    <aside class="g2a-sider">
+      <div class="g2a-brand">
+        <div class="g2a-logo">G</div>
+        <div>
+          <div class="g2a-brand-title">grokcli-2api</div>
+          <div class="g2a-brand-sub"><span id="app-version">…</span> · Admin</div>
+        </div>
+      </div>
+      <nav class="g2a-menu">
+        <a class="g2a-menu-item " href="/admin" data-page="overview"><span class="g2a-menu-ico">◫</span><span>概览</span></a>
+        <a class="g2a-menu-item " href="/admin/keys" data-page="keys"><span class="g2a-menu-ico">🔑</span><span>API Keys</span></a>
+        <a class="g2a-menu-item " href="/admin/accounts" data-page="accounts"><span class="g2a-menu-ico">👥</span><span>账号 / 轮询</span></a>
+        <a class="g2a-menu-item is-active" href="/admin/candy" data-page="candy"><span class="g2a-menu-ico">🍬</span><span>糖果测智</span></a>
+        <a class="g2a-menu-item " href="/admin/usage" data-page="usage"><span class="g2a-menu-ico">Σ</span><span>用量</span></a>
+        <a class="g2a-menu-item " href="/admin/logs" data-page="logs"><span class="g2a-menu-ico">📜</span><span>任务日志</span></a>
+        <a class="g2a-menu-item " href="/admin/models" data-page="models"><span class="g2a-menu-ico">▣</span><span>模型</span></a>
+        <a class="g2a-menu-item " href="/admin/settings" data-page="settings"><span class="g2a-menu-ico">⚙</span><span>系统设置</span></a>
+        <a class="g2a-menu-item " href="/admin/guide" data-page="guide"><span class="g2a-menu-ico">📘</span><span>接入指南</span></a>
+      </nav>
+      <div class="g2a-sider-foot">
+        <a href="/docs" target="_blank" rel="noopener">Swagger</a>
+        <a href="/health" target="_blank" rel="noopener">Health</a>
+        <a href="/metrics" target="_blank" rel="noopener">Metrics</a>
+        <button type="button" class="g2a-btn g2a-btn-default g2a-btn-block" id="btn-logout">退出登录</button>
+      </div>
+    </aside>
+    <div class="g2a-main">
+      <header class="g2a-header">
+        <div>
+          <h1 id="page-title">🍬 糖果测智与防降智巡检</h1>
+          <p id="page-sub">基于抽屉极值问题 (Candy Problem) 的模型推理评测与防降智智能巡检系统</p>
+        </div>
+        <div class="g2a-header-actions">
+          <span id="status-pill" class="g2a-tag">—</span>
+          <button type="button" class="g2a-theme-toggle" data-theme-toggle aria-label="切换主题"><span class="ico">☀️</span><span class="label">白天</span></button>
+          <button type="button" class="g2a-btn g2a-btn-default" id="btn-refresh">刷新</button>
+        </div>
+      </header>
+      <div class="g2a-mobile-nav" id="mobile-nav"></div>
+      <div class="g2a-content">
+
+<div id="panel-candy">
+  <!-- KPI 总览卡片 -->
+  <section class="g2a-card" style="margin-bottom:16px">
+    <div class="g2a-card-head">
+      <div>
+        <h3>防降智健康大盘</h3>
+        <p>通过下发复杂组合逻辑题评测模型深层思考能力，正解必定为 <strong>21</strong>；未得出 21 即判定降智并自动隔离。</p>
+      </div>
+      <div id="candy-kpi-cron-status" style="font-size:0.85rem">—</div>
+    </div>
+    <div class="g2a-stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px">
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">账号池总数</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-total">0</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">正常通过率</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-pass-rate" style="color:var(--g2a-color-success,#52c41a)">0.0%</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">🟢 正常通过 (21)</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-passed" style="color:var(--g2a-color-success,#52c41a)">0</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">🟡 弱思考可疑</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-suspicious" style="color:var(--g2a-color-warning,#faad14)">0</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">🔴 降智确诊 (已隔离)</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-degraded" style="color:var(--g2a-color-error,#ff4d4f)">0</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">🛡️ 出口节点 (正常/总数)</div>
+        <div class="g2a-stat-val mono" id="candy-kpi-egress" style="color:var(--g2a-color-primary,#1677ff)">0/0</div>
+      </div>
+      <div class="g2a-stat">
+        <div class="g2a-stat-label">⚪ 尚未受测</div>
+        <div class="g2a-stat-val mono g2a-muted" id="candy-kpi-unprobed">0</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 出口节点守护与自动迁移卡片 -->
+  <section class="g2a-card" style="margin-bottom:16px">
+    <div class="g2a-card-head" style="margin-bottom:12px;flex-wrap:wrap;gap:12px">
+      <div>
+        <h3 style="margin:0">🛡️ 出口节点守护与隔离迁移 (Egress Guard)</h3>
+        <p class="g2a-muted" style="margin:4px 0 0;font-size:0.85rem">
+          支持多住宅/ISP代理出口健康巡检。检测到出口降智（TPS异常飙升/算错21）自动<strong>隔离坏出口并原子迁出绑定的账号</strong>，避免整池被连带拖垮。
+        </p>
+      </div>
+      <div class="g2a-actions" style="flex-wrap:wrap;gap:8px">
+        <button type="button" class="g2a-btn g2a-btn-primary" id="btn-egress-auto-novproxy" title="调用 NovProxy 接口自动提取新鲜住宅家宽节点，并直接热装载到出口池">⚡ 自动装载 NovProxy 家宽节点</button>
+        <button type="button" class="g2a-btn g2a-btn-default" id="btn-egress-rebalance" title="将账号均分映射至所有健康出口节点">🔁 全池账号重平衡</button>
+      </div>
+    </div>
+    <div class="g2a-table-wrap">
+      <table class="g2a-table">
+        <thead>
+          <tr>
+            <th>节点 ID</th>
+            <th>代理出口地址</th>
+            <th>状态</th>
+            <th>绑定账号</th>
+            <th>最近延迟</th>
+            <th>输出吞吐 (TPS)</th>
+            <th>隔离原因 / 剩余时间</th>
+            <th style="text-align:right">操作</th>
+          </tr>
+        </thead>
+        <tbody id="egress-nodes-tbody">
+          <tr><td colspan="8" class="g2a-muted" style="text-align:center;padding:16px">暂无独立出站代理节点（系统设置中未配置 outbound_proxy 多行代理）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 账号测智明细与操作工具栏 -->
+  <section class="g2a-card" style="margin-bottom:16px">
+    <div class="g2a-card-head" style="margin-bottom:12px;flex-wrap:wrap;gap:12px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h3 style="margin:0">账号测智明细</h3>
+        <span class="g2a-muted" style="font-size:0.85rem">已选 <strong id="candy-selected-count">0</strong> 个账号</span>
+      </div>
+      <div class="g2a-actions" style="flex-wrap:wrap;gap:8px">
+        <button type="button" class="g2a-btn g2a-btn-default" id="btn-candy-probe-selected">🍬 批量测智选中</button>
+        <button type="button" class="g2a-btn g2a-btn-primary" id="btn-candy-probe-all" title="在后台并发对全池账号触发糖果测智，算错账号自动进入冷却">🍬 一键全池测智</button>
+        <button type="button" class="g2a-btn g2a-btn-default" id="btn-candy-refresh">刷新列表</button>
+      </div>
+    </div>
+
+    <!-- 过滤器行 -->
+    <div class="g2a-form-row" style="margin-bottom:14px;display:flex;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:240px">
+        <input type="text" id="candy-search" class="g2a-input" placeholder="搜索邮箱或账号 ID…" />
+      </div>
+      <div style="width:220px">
+        <select id="candy-filter-verdict" class="g2a-input">
+          <option value="all">全部状态</option>
+          <option value="candy_pass">🟢 正常通过 (正解21)</option>
+          <option value="candy_pass_low_reasoning">🟡 弱思考可疑</option>
+          <option value="candy_degraded">🔴 降智确诊 (已隔离)</option>
+          <option value="candy_degraded_tps_spike">⚡ 确诊降智 (TPS飙升/浅层替换)</option>
+          <option value="unprobed">⚪ 尚未受测</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 数据表格 -->
+    <div class="g2a-table-wrap">
+      <table class="g2a-table">
+        <thead>
+          <tr>
+            <th style="width:36px"><input type="checkbox" id="candy-select-all" /></th>
+            <th>账号 / 邮箱</th>
+            <th>绑定出口</th>
+            <th>评测结论</th>
+            <th>推导答案</th>
+            <th>思考 / 输出 Token</th>
+            <th>吞吐 (TPS)</th>
+            <th>响应耗时</th>
+            <th>池内状态</th>
+            <th>评测时间</th>
+            <th style="text-align:right">操作</th>
+          </tr>
+        </thead>
+        <tbody id="candy-tbody">
+          <tr><td colspan="11" class="g2a-muted" style="text-align:center;padding:32px">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 题目原理与巡检策略配置卡片 -->
+  <section class="g2a-card">
+    <div class="g2a-card-head">
+      <div>
+        <h3>🍬 评测原理与巡检参数配置</h3>
+        <p>配置后台定时巡检频率与降智惩罚隔离机制。</p>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:24px">
+      <!-- 原理说明卡 -->
+      <div style="background:var(--g2a-bg-subtle,#f8f9fa);padding:14px 18px;border-radius:8px;font-size:0.85rem;line-height:1.6">
+        <div style="font-weight:600;margin-bottom:6px">💡 为什么糖果题能 100% 鉴别降智？</div>
+        <p style="margin-bottom:8px">袋中有 3 种口味（苹果、桃、西瓜）及 2 种形状（圆、星），求最少摸出多少个才能保证同时拥有不同形状的苹果与桃子：</p>
+        <ul style="padding-left:18px;margin-bottom:8px">
+          <li>圆形：苹果 7、桃子 9、西瓜 8（共 24 个）</li>
+          <li>五角星：苹果 7、桃子 6、西瓜 4（共 17 个）</li>
+        </ul>
+        <p style="margin:0">
+          极值反例构造要求同时避开四种失败集合，推导得出反例最大取数上限为 20。故 <strong>最少取出 21 个</strong> 必定满足要求。<br>
+          降智模型（如偷换轻量小模型、截断思维链）必定出现逻辑漂移，得出 36、29、18 等错误数字。
+        </p>
+      </div>
+
+      <!-- 参数表单 -->
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <label class="g2a-check">
+          <input type="checkbox" id="set-candy-page-enabled" checked />
+          <strong>启用全自动后台巡检调度</strong>
+        </label>
+        <div class="g2a-field">
+          <label for="set-candy-page-interval">自动巡检周期（秒）</label>
+          <input id="set-candy-page-interval" type="number" class="g2a-input" min="600" max="259200" step="1" value="21600" />
+          <div class="g2a-muted" style="font-size:0.75rem;margin-top:2px">默认 21600 秒（每 6 小时轮巡一次全池）</div>
+        </div>
+        <div class="g2a-field">
+          <label for="set-candy-page-cooldown">降智惩罚冷却（小时）</label>
+          <input id="set-candy-page-cooldown" type="number" class="g2a-input" min="1" max="168" step="1" value="48" />
+          <div class="g2a-muted" style="font-size:0.75rem;margin-top:2px">未答出 21 时施加的冷却惩罚隔离时长，默认 48 小时</div>
+        </div>
+        <div>
+          <button type="button" class="g2a-btn g2a-btn-primary" id="btn-save-candy-config">保存巡检配置</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+      </div>
+    </div>
+  </div>
+  <script src="/static/dist/utils.ac10ff3b58.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/api.9ac71f7ed9.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/auth.fa7b1e0e4d.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.c77e14049a.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+</body>
+</html>

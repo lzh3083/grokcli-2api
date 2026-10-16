@@ -327,6 +327,7 @@ const PAGE_META = {
   overview: { title: "概览", sub: "服务状态、账号池与 Token 健康度一览" },
   keys: { title: "API Keys", sub: "创建、复制、停用客户端访问密钥" },
   accounts: { title: "账号 / 轮询", sub: "Grok 账号、设备码登录、额度与导入导出" },
+  candy: { title: "糖果测智", sub: "基于抽屉极值问题 (Candy Problem) 的模型推理与防降智巡检评估" },
   usage: { title: "用量", sub: "Token 消耗与请求使用情况（今日按上海时间日切 / 近 N 天 / 累计）" },
   logs: { title: "任务日志", sub: "查询后台任务结果（协议注册、SSO 导入、测活、Token 续期等）" },
   models: { title: "模型", sub: "上游模型目录（入库）与探测结果" },
@@ -351,7 +352,7 @@ function showMain() {
   startAutoUiRefresh();
 }
 
-const PAGE_HREF = { overview: "/admin", keys: "/admin/keys", accounts: "/admin/accounts", usage: "/admin/usage", logs: "/admin/logs", models: "/admin/models", settings: "/admin/settings", guide: "/admin/guide" };
+const PAGE_HREF = { overview: "/admin", keys: "/admin/keys", accounts: "/admin/accounts", candy: "/admin/candy", usage: "/admin/usage", logs: "/admin/logs", models: "/admin/models", settings: "/admin/settings", guide: "/admin/guide" };
 let _softNavToken = 0;
 let _softNavBusy = false;
 let _softNavBusySince = 0;
@@ -360,6 +361,7 @@ function pageFromPath(pathname) {
   const p = (pathname || location.pathname || "").replace(/\/$/, "") || "/admin";
   if (p.endsWith("/keys")) return "keys";
   if (p.endsWith("/accounts")) return "accounts";
+  if (p.endsWith("/candy")) return "candy";
   if (p.endsWith("/usage")) return "usage";
   if (p.endsWith("/logs")) return "logs";
   if (p.endsWith("/models")) return "models";
@@ -512,6 +514,10 @@ async function softNavigate(name, opts) {
             syncRegMailProviderUI();
           }
         } catch (_) {}
+      } else if (page === "candy") {
+        if (typeof loadCandyPage === "function") {
+          Promise.resolve(loadCandyPage()).catch((e) => console.warn("soft nav loadCandyPage", e));
+        }
       } else if (typeof loadDashboard === "function") {
         Promise.resolve(loadDashboard()).catch((e) => console.warn("soft nav loadDashboard", e));
       }
@@ -1235,6 +1241,7 @@ function rebindPageControls() {
   if ($("btn-acc-delete-selected")) $("btn-acc-delete-selected").onclick = () => deleteSelectedAccounts();
   if ($("btn-acc-renew-selected")) $("btn-acc-renew-selected").onclick = () => renewAccounts(Array.from(selectedAccountIds));
   if ($("btn-acc-probe-selected")) $("btn-acc-probe-selected").onclick = () => probeAccounts(Array.from(selectedAccountIds));
+  if ($("btn-acc-candy-selected")) $("btn-acc-candy-selected").onclick = () => runBatchCandyEval(Array.from(selectedAccountIds));
   if ($("btn-acc-export-selected")) $("btn-acc-export-selected").onclick = () => exportSelectedAccounts();
   if ($("btn-acc-export-sso-selected")) $("btn-acc-export-sso-selected").onclick = () => exportSelectedAccountsSso();
   if ($("btn-acc-export-sso-all")) $("btn-acc-export-sso-all").onclick = () => exportAllAccountsSso();
@@ -1386,6 +1393,7 @@ function rebindPageControls() {
       try {
         if (btn.dataset.act === "renew-one") { await renewAccounts([id], { confirmMany: false }); return; }
         if (btn.dataset.act === "probe-one") { await runAccountProbe(id); return; }
+        if (btn.dataset.act === "candy-one") { await runAccountCandyEval(id); return; }
         if (btn.dataset.act === "quota-one") {
           setRowBusy(id, true, "查询中");
           try {
@@ -2665,6 +2673,7 @@ function renderAccountsPage() {
       <td class="g2a-actions">
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="renew-one" data-id="${esc(a.id)}" ${a.has_refresh_token ? "" : "disabled title=\"无 refresh_token，无法续期\""}>续期</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="probe-one" data-id="${esc(a.id)}">模型测试</button>
+        <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="candy-one" data-id="${esc(a.id)}" title="执行糖果测试（答出 21 判定为未降智）">🍬 测智</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="quota-one" data-id="${esc(a.id)}">额度</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="toggle-acc" data-id="${esc(a.id)}" data-on="${enabled ? 0 : 1}">${enabled ? "禁用" : "启用"}</button>
         <button class="g2a-btn g2a-btn-danger g2a-btn-sm" data-act="rm-acc" data-id="${esc(a.id)}">移除</button>
@@ -3252,6 +3261,7 @@ function renderOneAccountRow(account) {
       <td class="g2a-actions">
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="renew-one" data-id="${esc(a.id)}" ${a.has_refresh_token ? "" : "disabled title=\"无 refresh_token，无法续期\""}>续期</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="probe-one" data-id="${esc(a.id)}">模型测试</button>
+        <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="candy-one" data-id="${esc(a.id)}" title="执行糖果测试（答出 21 判定为未降智）">🍬 测智</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="quota-one" data-id="${esc(a.id)}">额度</button>
         <button class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="toggle-acc" data-id="${esc(a.id)}" data-on="${enabled ? 0 : 1}">${enabled ? "禁用" : "启用"}</button>
         <button class="g2a-btn g2a-btn-danger g2a-btn-sm" data-act="rm-acc" data-id="${esc(a.id)}">移除</button>
@@ -3802,6 +3812,7 @@ if ($("btn-acc-select-none")) $("btn-acc-select-none").onclick = () => {
 if ($("btn-acc-delete-selected")) $("btn-acc-delete-selected").onclick = () => deleteSelectedAccounts();
 if ($("btn-acc-renew-selected")) $("btn-acc-renew-selected").onclick = () => renewAccounts(Array.from(selectedAccountIds));
   if ($("btn-acc-probe-selected")) $("btn-acc-probe-selected").onclick = () => probeAccounts(Array.from(selectedAccountIds));
+  if ($("btn-acc-candy-selected")) $("btn-acc-candy-selected").onclick = () => runBatchCandyEval(Array.from(selectedAccountIds));
 if ($("btn-acc-export-selected")) $("btn-acc-export-selected").onclick = () => exportSelectedAccounts();
 // Header checkbox is bound via document-level change listener + rebindPageControls.
 if ($("acc-check-page")) {
@@ -3968,7 +3979,14 @@ function fmtProbeCell(lastProbe, lastError, blockedIds) {
     return err;
   }
   const ok = lp.available || lp.ok;
-  const pill = ok ? '<span class="g2a-tag ok">正常</span>' : '<span class="g2a-tag bad">报错</span>';
+  let pill = ok ? '<span class="g2a-tag ok">正常</span>' : '<span class="g2a-tag bad">报错</span>';
+  if (lp.verdict === "candy_pass") {
+    pill = '<span class="g2a-tag ok" title="糖果测试通过 (答出 21)">🍬 正常</span>';
+  } else if (lp.verdict === "candy_pass_low_reasoning") {
+    pill = '<span class="g2a-tag warn" title="糖果测试答出 21 但思考 Token 偏少">🍬 可疑</span>';
+  } else if (lp.verdict === "candy_degraded") {
+    pill = '<span class="g2a-tag bad" title="糖果测试未答出 21，确诊降智">🧠 降智</span>';
+  }
   const model = lp.model ? `<span class="mono">${esc(lp.model)}</span>` : "";
   const when = lp.probed_at ? fmtTime(lp.probed_at) : "";
   const err = (!ok && lp.error)
@@ -5116,6 +5134,101 @@ async function runAccountProbe(accountId, model) {
     toast(e.message, false);
   } finally {
     setRowBusy(accountId, false);
+  }
+}
+
+async function runAccountCandyEval(accountId, model) {
+  setLogPanel("probe-result", `🍬 糖果测试推导中（正解=21）… account=${accountId}`, { forceShow: true });
+  setRowBusy(accountId, true, "测智中");
+  try {
+    const body = { type: "candy" };
+    if (model) body.model = model;
+    const r = await api("/accounts/" + encodeURIComponent(accountId) + "/candy-eval", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const res = r.result || r;
+    const ok = !!(r.ok || res.available || res.verdict === "candy_pass");
+    const verdict = res.verdict || "candy_degraded";
+    const ans = res.extracted_answer != null ? res.extracted_answer : "—";
+    const cooling = !!(res.kicked_cooldown);
+
+    let verdictText = "❌ 降智确诊 (未答出21)";
+    if (verdict === "candy_pass") verdictText = "✅ 正常通过 (正确答出21)";
+    else if (verdict === "candy_pass_low_reasoning") verdictText = "⚠️ 可疑通过 (答出21但弱思考)";
+
+    const lines = [
+      ok ? "🍬 糖果测试完成" : "🧠 糖果测试降智拦截",
+      `判定: ${verdictText}`,
+      `账号: ${r.email || res.email || accountId}`,
+      `模型: ${res.model || "—"}`,
+      `提取结论: ${ans}`,
+      res.reasoning_tokens != null ? `思考 Token: ${res.reasoning_tokens}` : null,
+      res.completion_tokens != null ? `输出 Token: ${res.completion_tokens}` : null,
+      res.latency_ms != null ? `耗时: ${res.latency_ms} ms` : null,
+      cooling ? "处置: 已自动施加 48 小时惩罚性冷却" : null,
+      res.content_snippet ? `回答片段: ${res.content_snippet}` : null,
+    ].filter(Boolean);
+
+    setLogPanel("probe-result", lines.join("\n"), { forceShow: true });
+    toast(
+      ok ? "糖果测试通过 (答出 21，未降智)" : "降智确诊: 未答出 21，已自动关进冷却池",
+      ok
+    );
+    const poolPatch = poolPatchFromProbeResponse(r);
+    applyAccountLivePatch(accountId, {
+      email: r.email || res.email,
+      _pool: poolPatch,
+    });
+    if (cooling || (poolPatch && poolPatch.in_cooldown)) {
+      Promise.resolve().then(() => softRefreshPoolChips({ stats: true }));
+    }
+  } catch (e) {
+    setLogPanel("probe-result", "✗ 糖果测试失败: " + e.message, { forceShow: true });
+    toast(e.message, false);
+  } finally {
+    setRowBusy(accountId, false);
+  }
+}
+
+async function runBatchCandyEval(ids, { confirmMany = true } = {}) {
+  const list = Array.from(new Set((ids || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (!list.length) {
+    toast("请先选择要进行糖果测试的账号", false);
+    return;
+  }
+  if (confirmMany && list.length > 1) {
+    if (!confirm(`确认对选中的 ${list.length} 个账号执行糖果测智？\n未答出 21 的降智账号将自动关入 48 小时冷却惩罚池。`)) return;
+  }
+  setLogPanel("probe-result", `🍬 批量糖果测试中… ×${list.length}`, { forceShow: true });
+  try {
+    const r = await api("/accounts/candy-eval", {
+      method: "POST",
+      body: JSON.stringify({ ids: list, type: "candy" }),
+    });
+    const results = r.results || [];
+    let passCount = 0;
+    let degradedCount = 0;
+    const lines = [`🍬 批量糖果测试完成: 共 ${results.length} 个账号`];
+    for (const item of results) {
+      const res = item.result || {};
+      const aid = item.account_id || res.account_id;
+      const ok = item.ok || res.available || res.verdict === "candy_pass";
+      if (ok) passCount++; else degradedCount++;
+      const v = res.verdict || "candy_degraded";
+      const icon = v === "candy_pass" ? "✅" : (v === "candy_pass_low_reasoning" ? "⚠️" : "🧠");
+      lines.push(`${icon} ${aid}: 答案=${res.extracted_answer || '—'} 思考=${res.reasoning_tokens || 0}tok 判定=${v}`);
+      if (item.pool) {
+        applyAccountLivePatch(aid, { _pool: item.pool });
+      }
+    }
+    lines.push(`汇总: 正常通过=${passCount}, 降智拦截=${degradedCount}`);
+    setLogPanel("probe-result", lines.join("\n"), { forceShow: true });
+    toast(`糖果测试完成: 正常 ${passCount} / 降智 ${degradedCount}`);
+    Promise.resolve().then(() => softRefreshPoolChips({ stats: true }));
+  } catch (e) {
+    setLogPanel("probe-result", "✗ 批量糖果测试出错: " + e.message, { forceShow: true });
+    toast(e.message, false);
   }
 }
 
@@ -8862,6 +8975,10 @@ on("accounts-tbody", "onclick", async (e) => {  // checkbox selection
       await runAccountProbe(id);
       return;
     }
+    if (btn.dataset.act === "candy-one") {
+      await runAccountCandyEval(id);
+      return;
+    }
     if (btn.dataset.act === "quota-one") {
       setRowBusy(id, true, "查询中");
       try {
@@ -10571,6 +10688,15 @@ function fillSystemSettingsForm(s) {
   if ($("set-model-health-workers") && s.model_health_probe_workers != null) {
     $("set-model-health-workers").value = s.model_health_probe_workers;
   }
+  if ($("set-candy-eval-interval") && s.candy_eval_interval_sec != null) {
+    $("set-candy-eval-interval").value = s.candy_eval_interval_sec;
+  }
+  if ($("set-candy-eval-cooldown") && s.candy_eval_cooldown_hours != null) {
+    $("set-candy-eval-cooldown").value = s.candy_eval_cooldown_hours;
+  }
+  if ($("set-candy-eval-enabled") && s.candy_eval_enabled != null) {
+    $("set-candy-eval-enabled").checked = !!s.candy_eval_enabled;
+  }
   if ($("set-affinity-ttl") && s.conversation_affinity_ttl_sec != null) {
     $("set-affinity-ttl").value = s.conversation_affinity_ttl_sec;
   }
@@ -10720,6 +10846,15 @@ function collectSystemSettingsPatch(groups) {
     }
     if ($("set-model-health-workers") && $("set-model-health-workers").value !== "") {
       patch.model_health_probe_workers = Number($("set-model-health-workers").value);
+    }
+    if ($("set-candy-eval-interval") && $("set-candy-eval-interval").value !== "") {
+      patch.candy_eval_interval_sec = Number($("set-candy-eval-interval").value);
+    }
+    if ($("set-candy-eval-cooldown") && $("set-candy-eval-cooldown").value !== "") {
+      patch.candy_eval_cooldown_hours = Number($("set-candy-eval-cooldown").value);
+    }
+    if ($("set-candy-eval-enabled")) {
+      patch.candy_eval_enabled = $("set-candy-eval-enabled").checked;
     }
     if ($("set-affinity-ttl") && $("set-affinity-ttl").value !== "") {
       patch.conversation_affinity_ttl_sec = Number($("set-affinity-ttl").value);
@@ -11024,6 +11159,9 @@ function applySettingsGroupDefaults(group) {
     if ($("set-model-health-interval")) $("set-model-health-interval").value = d.model_health_interval_sec;
     if ($("set-model-health-batch")) $("set-model-health-batch").value = d.model_health_probe_batch;
     if ($("set-model-health-workers")) $("set-model-health-workers").value = d.model_health_probe_workers;
+    if ($("set-candy-eval-interval")) $("set-candy-eval-interval").value = 21600;
+    if ($("set-candy-eval-cooldown")) $("set-candy-eval-cooldown").value = 12;
+    if ($("set-candy-eval-enabled")) $("set-candy-eval-enabled").checked = true;
     if ($("set-affinity-ttl")) $("set-affinity-ttl").value = d.conversation_affinity_ttl_sec;
     if ($("set-probe-models")) $("set-probe-models").value = d.probe_models;
   } else if (group === "proxy") {
@@ -12683,11 +12821,539 @@ function bindVersionSettingsUI() {
   }
 }
 
+/* ── Candy Eval (防降智独立模块) ─────────────────────────────────── */
+let _candyOverviewCache = null;
+let _candyFilterStatus = "all";
+let _candySearchQuery = "";
+let _candySelectedIds = new Set();
+
+async function loadCandyPage({ silent = false } = {}) {
+  const tbody = $("candy-tbody");
+  if (!tbody) return;
+  if (!silent && !_candyOverviewCache) {
+    tbody.innerHTML = '<tr><td colspan="11" class="g2a-muted" style="text-align:center;padding:32px">正在分析账号池测智状态…</td></tr>';
+  }
+  try {
+    const data = await api("/candy/overview");
+    if (!data || !data.ok) throw new Error((data && data.detail) || "加载失败");
+    _candyOverviewCache = data;
+    renderCandyKPI(data.stats, data.config, data.egress_nodes);
+    renderCandyEgressNodes(data.egress_nodes || []);
+    renderCandyConfigForm(data.config);
+    renderCandyTable(data.accounts || []);
+    bindCandyPageControls();
+  } catch (e) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="g2a-muted" style="text-align:center;padding:24px">加载失败：${esc(e.message || e)}</td></tr>`;
+    toast("加载糖果测智概况失败: " + e.message, false);
+  }
+}
+
+function renderCandyKPI(stats, config, egressNodes) {
+  if (!stats) return;
+  if ($("candy-kpi-total")) $("candy-kpi-total").textContent = stats.total || 0;
+  if ($("candy-kpi-passed")) $("candy-kpi-passed").textContent = stats.passed || 0;
+  if ($("candy-kpi-suspicious")) $("candy-kpi-suspicious").textContent = stats.suspicious || 0;
+  if ($("candy-kpi-degraded")) $("candy-kpi-degraded").textContent = stats.degraded || 0;
+  if ($("candy-kpi-unprobed")) $("candy-kpi-unprobed").textContent = stats.unprobed || 0;
+  if ($("candy-kpi-pass-rate")) {
+    const rate = stats.pass_rate != null ? stats.pass_rate.toFixed(1) + "%" : "—";
+    $("candy-kpi-pass-rate").textContent = rate;
+  }
+  if ($("candy-kpi-egress")) {
+    const nodes = egressNodes || [];
+    const healthyCount = nodes.filter(n => n.status === "healthy").length;
+    $("candy-kpi-egress").textContent = nodes.length ? `${healthyCount}/${nodes.length}` : "默认直连";
+  }
+  if ($("candy-kpi-cron-status")) {
+    const en = config && config.enabled;
+    const intv = (config && config.interval_sec) || 21600;
+    const hours = (intv / 3600).toFixed(1).replace(/\.0$/, "");
+    $("candy-kpi-cron-status").innerHTML = en
+      ? `<span class="g2a-tag ok">巡检运行中</span> 每 ${hours} 小时全池轮巡`
+      : `<span class="g2a-tag">已停用</span> 仅支持手动测智`;
+  }
+}
+
+function renderCandyEgressNodes(nodes) {
+  const tbody = $("egress-nodes-tbody");
+  if (!tbody) return;
+  if (!nodes || !nodes.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="g2a-muted" style="text-align:center;padding:16px">暂无独立出站节点（系统设置中未配置 outbound_proxy 多行代理）</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = nodes.map((n) => {
+    let statusBadge = '<span class="g2a-tag ok">🟢 正常通道</span>';
+    let isQuarantined = n.status === "quarantined";
+    if (isQuarantined) {
+      statusBadge = '<span class="g2a-tag bad">🔴 隔离中</span>';
+    } else if (n.status === "warning") {
+      statusBadge = '<span class="g2a-tag warn">🟡 告警观察</span>';
+    }
+
+    const tpsText = n.last_tps > 0 ? `${n.last_tps.toFixed(1)} tok/s` : "—";
+    const tpsStyle = n.last_tps >= 500 ? 'color:var(--g2a-color-error,#ff4d4f);font-weight:600' : '';
+    const latText = n.last_latency_ms > 0 ? `${(n.last_latency_ms / 1000).toFixed(1)}s` : "—";
+    const boundCount = `<span class="mono" style="font-weight:600">${n.bound_account_count || 0}</span> 个账号`;
+
+    let reasonText = '<span class="g2a-muted">健康正常</span>';
+    if (isQuarantined) {
+      reasonText = `<div style="color:var(--g2a-color-error,#ff4d4f);font-size:0.75rem">${esc(n.quarantine_reason || "检测到异常被隔离")}</div>`;
+    }
+
+    return `<tr data-egress-id="${esc(n.id)}">
+      <td><span class="mono" style="font-weight:600">${esc(n.id)}</span></td>
+      <td><span class="mono" style="font-size:0.8rem">${esc(n.redacted_url || n.proxy_url)}</span></td>
+      <td>${statusBadge}</td>
+      <td>${boundCount}</td>
+      <td>${latText}</td>
+      <td><span class="mono" style="${tpsStyle}">${tpsText}</span></td>
+      <td>${reasonText}</td>
+      <td class="g2a-actions" style="text-align:right">
+        ${isQuarantined
+          ? `<button type="button" class="g2a-btn g2a-btn-success g2a-btn-sm" data-act="egress-restore-one" data-id="${esc(n.id)}">🟢 恢复</button>`
+          : `<button type="button" class="g2a-btn g2a-btn-danger g2a-btn-sm" data-act="egress-quarantine-one" data-id="${esc(n.id)}">⚠️ 隔离</button>`
+        }
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function renderCandyConfigForm(cfg) {
+  if (!cfg) return;
+  if ($("set-candy-page-enabled")) $("set-candy-page-enabled").checked = !!cfg.enabled;
+  if ($("set-candy-page-interval")) $("set-candy-page-interval").value = cfg.interval_sec || 21600;
+  if ($("set-candy-page-cooldown")) $("set-candy-page-cooldown").value = cfg.cooldown_hours || 48;
+}
+
+function renderCandyTable(accounts) {
+  const tbody = $("candy-tbody");
+  if (!tbody) return;
+
+  const q = (_candySearchQuery || "").trim().toLowerCase();
+  const st = _candyFilterStatus;
+
+  const filtered = (accounts || []).filter((a) => {
+    if (st !== "all" && a.verdict !== st) return false;
+    if (q) {
+      const idMatch = (a.id || "").toLowerCase().includes(q);
+      const emailMatch = (a.email || "").toLowerCase().includes(q);
+      const nodeMatch = (a.egress_node_id || "").toLowerCase().includes(q);
+      if (!idMatch && !emailMatch && !nodeMatch) return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="g2a-muted" style="text-align:center;padding:24px">无匹配的测智记录</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map((a) => {
+    const chk = _candySelectedIds.has(a.id) ? "checked" : "";
+    let verdictBadge = '<span class="g2a-tag">⚪ 尚未受测</span>';
+    if (a.verdict === "candy_pass") {
+      verdictBadge = '<span class="g2a-tag ok" title="答出标准正解 21，思维健康">🍬 正常通过</span>';
+    } else if (a.verdict === "candy_pass_low_reasoning") {
+      verdictBadge = '<span class="g2a-tag warn" title="答出 21 但思考 Token 偏低">⚠️ 弱思维可疑</span>';
+    } else if (a.verdict === "candy_degraded_tps_spike") {
+      verdictBadge = '<span class="g2a-tag bad" style="border-color:#722ed1;color:#722ed1;background:rgba(114,46,209,0.1)" title="答案错误且TPS异常飙升，疑似浅层Mini被调换">⚡ 降智(TPS飙升)</span>';
+    } else if (a.verdict === "candy_degraded") {
+      verdictBadge = '<span class="g2a-tag bad" title="未答出 21，确诊降智并被隔离">🧠 降智确诊</span>';
+    }
+
+    const ans = a.extracted_answer != null ? `<span class="mono" style="font-weight:600;color:${a.extracted_answer === 21 ? 'var(--g2a-color-success,#52c41a)' : 'var(--g2a-color-error,#ff4d4f)'}">${a.extracted_answer}</span>` : '<span class="g2a-muted">—</span>';
+    const rt = a.reasoning_tokens ? `<span class="mono">${a.reasoning_tokens}</span>` : '<span class="g2a-muted">0</span>';
+    const ct = a.completion_tokens ? `<span class="mono">${a.completion_tokens}</span>` : '<span class="g2a-muted">0</span>';
+    const lat = a.latency_ms ? `${(a.latency_ms / 1000).toFixed(1)}s` : '<span class="g2a-muted">—</span>';
+    const probedAt = a.probed_at ? fmtTime(a.probed_at) : '<span class="g2a-muted">未测</span>';
+
+    const tpsVal = a.tps ? `${a.tps.toFixed(1)} tok/s` : (a.completion_tokens && a.latency_ms > 100 ? `${(a.completion_tokens / (a.latency_ms / 1000)).toFixed(1)} tok/s` : '—');
+    const tpsStyle = (a.tps >= 500 || (a.completion_tokens && a.latency_ms > 100 && (a.completion_tokens / (a.latency_ms / 1000)) >= 500)) ? 'color:var(--g2a-color-error,#ff4d4f);font-weight:600' : '';
+
+    const egressNode = a.egress_node_id ? `<span class="g2a-tag" style="font-family:monospace;font-size:0.75rem">${esc(a.egress_node_id)}</span>` : '<span class="g2a-muted">默认</span>';
+
+    let cdStatus = '<span class="g2a-tag ok">正常轮询</span>';
+    if (a.in_cooldown) {
+      const remH = (a.cooldown_remaining_sec ? (a.cooldown_remaining_sec / 3600).toFixed(1) : 0);
+      cdStatus = `<span class="g2a-tag bad" title="${esc(a.cooldown_reason || '惩罚冷却中')}">惩罚冷却中 · 剩 ${remH}h</span>`;
+    }
+
+    return `<tr data-candy-id="${esc(a.id)}">
+      <td style="width:36px"><input type="checkbox" class="candy-check-one" data-id="${esc(a.id)}" ${chk} /></td>
+      <td>
+        <div style="font-weight:500">${esc(a.email || a.id)}</div>
+        <div class="g2a-muted mono" style="font-size:0.75rem">${esc(a.id)}</div>
+      </td>
+      <td>${egressNode}</td>
+      <td>${verdictBadge}</td>
+      <td>${ans}</td>
+      <td>${rt} tok / ${ct} tok</td>
+      <td><span class="mono" style="${tpsStyle}">${tpsVal}</span></td>
+      <td>${lat}</td>
+      <td>${cdStatus}</td>
+      <td style="font-size:0.8rem">${probedAt}</td>
+      <td class="g2a-actions">
+        <button type="button" class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="candy-probe-one" data-id="${esc(a.id)}">🍬 测智</button>
+        <button type="button" class="g2a-btn g2a-btn-default g2a-btn-sm" data-act="candy-detail-one" data-id="${esc(a.id)}">诊断详情</button>
+        ${a.in_cooldown ? `<button type="button" class="g2a-btn g2a-btn-danger g2a-btn-sm" data-act="candy-clear-cd-one" data-id="${esc(a.id)}">解禁</button>` : ''}
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function bindCandyPageControls() {
+  const host = $("panel-candy");
+  if (!host || host._candyBound) return;
+  host._candyBound = true;
+
+  if ($("candy-search")) {
+    $("candy-search").oninput = (e) => {
+      _candySearchQuery = e.target.value;
+      if (_candyOverviewCache) renderCandyTable(_candyOverviewCache.accounts);
+    };
+  }
+  if ($("candy-filter-verdict")) {
+    $("candy-filter-verdict").onchange = (e) => {
+      _candyFilterStatus = e.target.value;
+      if (_candyOverviewCache) renderCandyTable(_candyOverviewCache.accounts);
+    };
+  }
+
+  if ($("candy-select-all")) {
+    $("candy-select-all").onchange = (e) => {
+      const checked = e.target.checked;
+      document.querySelectorAll(".candy-check-one").forEach((cb) => {
+        cb.checked = checked;
+        const id = cb.dataset.id;
+        if (checked) _candySelectedIds.add(id);
+        else _candySelectedIds.delete(id);
+      });
+      updateCandySelectedCount();
+    };
+  }
+
+  host.onclick = async (e) => {
+    const cb = e.target.closest(".candy-check-one");
+    if (cb) {
+      if (cb.checked) _candySelectedIds.add(cb.dataset.id);
+      else _candySelectedIds.delete(cb.dataset.id);
+      updateCandySelectedCount();
+      return;
+    }
+
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const id = btn.dataset.id;
+
+    if (act === "candy-probe-one") {
+      await runAccountCandyEval(id);
+      await loadCandyPage({ silent: true });
+      return;
+    }
+    if (act === "candy-clear-cd-one") {
+      try {
+        await api("/accounts/" + encodeURIComponent(id) + "/cooldown/clear", { method: "POST" });
+        toast("已解除冷却隔离");
+        await loadCandyPage({ silent: true });
+      } catch (err) {
+        toast("解除冷却失败: " + err.message, false);
+      }
+      return;
+    }
+    if (act === "candy-detail-one") {
+      showCandyDetailModal(id);
+      return;
+    }
+    if (act === "egress-quarantine-one") {
+      const hours = prompt("请输入隔离该出口节点的时长（小时）：", "1");
+      if (!hours || isNaN(Number(hours))) return;
+      try {
+        const r = await api("/egress/nodes/" + encodeURIComponent(id) + "/quarantine", {
+          method: "POST",
+          body: JSON.stringify({ duration_hours: Number(hours), reason: "管理员手动隔离出口节点" }),
+        });
+        toast(r.message || "出口节点已隔离，关联账号已自动迁出");
+        await loadCandyPage({ silent: true });
+      } catch (err) {
+        toast("隔离失败: " + err.message, false);
+      }
+      return;
+    }
+    if (act === "egress-restore-one") {
+      try {
+        const r = await api("/egress/nodes/" + encodeURIComponent(id) + "/restore", { method: "POST" });
+        toast(r.message || "出口节点已恢复健康");
+        await loadCandyPage({ silent: true });
+      } catch (err) {
+        toast("恢复节点失败: " + err.message, false);
+      }
+      return;
+    }
+  };
+
+  if ($("btn-egress-auto-novproxy")) {
+    $("btn-egress-auto-novproxy").onclick = () => {
+      showNovProxyAutoExtractModal();
+    };
+  }
+
+  if ($("btn-egress-rebalance")) {
+    $("btn-egress-rebalance").onclick = async () => {
+      if (!confirm("确认对全池账号执行重平衡？\n系统将把所有账号均匀重新映射粘性分配到当前各个健康出口节点上。")) return;
+      try {
+        const r = await api("/egress/rebalance", { method: "POST" });
+        toast(r.message || "全池账号重平衡完成");
+        await loadCandyPage({ silent: true });
+      } catch (err) {
+        toast("重平衡失败: " + err.message, false);
+      }
+    };
+  }
+
+  if ($("btn-candy-probe-selected")) {
+    $("btn-candy-probe-selected").onclick = async () => {
+      const ids = Array.from(_candySelectedIds);
+      if (!ids.length) {
+        toast("请先勾选需要测智的账号", false);
+        return;
+      }
+      await runBatchCandyEval(ids);
+      await loadCandyPage({ silent: true });
+    };
+  }
+
+  if ($("btn-candy-probe-all")) {
+    $("btn-candy-probe-all").onclick = async () => {
+      if (!confirm("确认对池内所有账号触发全量糖果降智巡检？\n系统将在后台并发执行并对算错的降智账号实施自动冷却隔离。")) return;
+      try {
+        const r = await api("/candy/probe-all", { method: "POST" });
+        toast(r.message || "全池糖果巡检已在后台启动");
+        setTimeout(() => loadCandyPage({ silent: true }), 3000);
+      } catch (err) {
+        toast("启动失败: " + err.message, false);
+      }
+    };
+  }
+
+  if ($("btn-candy-refresh")) {
+    $("btn-candy-refresh").onclick = () => loadCandyPage();
+  }
+
+  if ($("btn-save-candy-config")) {
+    $("btn-save-candy-config").onclick = async () => {
+      const enabled = $("set-candy-page-enabled") ? $("set-candy-page-enabled").checked : true;
+      const interval_sec = $("set-candy-page-interval") ? Number($("set-candy-page-interval").value) : 21600;
+      const cooldown_hours = $("set-candy-page-cooldown") ? Number($("set-candy-page-cooldown").value) : 48;
+      try {
+        await api("/candy/config", {
+          method: "POST",
+          body: JSON.stringify({ enabled, interval_sec, cooldown_hours }),
+        });
+        toast("糖果防降智巡检配置已保存");
+        await loadCandyPage({ silent: true });
+      } catch (err) {
+        toast("保存配置失败: " + err.message, false);
+      }
+    };
+  }
+}
+
+function updateCandySelectedCount() {
+  const el = $("candy-selected-count");
+  if (el) el.textContent = _candySelectedIds.size;
+}
+
+function showCandyDetailModal(accountId) {
+  if (!_candyOverviewCache) return;
+  const item = (_candyOverviewCache.accounts || []).find((x) => x.id === accountId);
+  if (!item) return;
+
+  let modal = $("candy-cot-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "candy-cot-modal";
+    modal.className = "g2a-modal-mask hidden";
+    modal.innerHTML = `
+      <div class="g2a-modal-wrap" style="max-width:760px;width:95%">
+        <div class="g2a-card">
+          <div class="g2a-card-head" style="margin-bottom:12px">
+            <div>
+              <h3 id="candy-modal-title">糖果思维链与推导诊断</h3>
+              <p id="candy-modal-sub" class="g2a-muted"></p>
+            </div>
+            <button type="button" class="g2a-btn g2a-btn-default g2a-btn-sm" id="btn-close-candy-modal">关闭</button>
+          </div>
+          <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+            <div class="g2a-badge-pill" id="candy-modal-badge">—</div>
+            <div class="g2a-muted" id="candy-modal-stats"></div>
+          </div>
+          <div style="margin-bottom:12px">
+            <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">标准测试题目与正解逻辑：</div>
+            <div class="g2a-pre" style="max-height:120px;overflow-y:auto;font-size:0.8rem;background:var(--g2a-bg-subtle,#f5f5f5)">三种口味(苹果、桃子、西瓜)与两种形状(圆形、五角星)。
+圆形数量：苹果7、桃子9、西瓜8；五角星数量：苹果7、桃子6、西瓜4。
+最少取出多少个才能保证同时拥有不同形状的苹果与桃子？
+★ 数学正解必定为：21（取9个圆与12个星，规避反例集合）。</div>
+          </div>
+          <div style="margin-bottom:12px">
+            <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">模型实际推导与回答内容：</div>
+            <pre class="g2a-pre" id="candy-modal-content" style="max-height:260px;overflow-y:auto;white-space:pre-wrap;font-size:0.82rem;font-family:monospace"></pre>
+          </div>
+          <div id="candy-modal-conclusion" style="padding:10px 14px;border-radius:6px;font-size:0.85rem"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector("#btn-close-candy-modal").onclick = () => modal.classList.add("hidden");
+    modal.onclick = (e) => { if (e.target === modal) modal.classList.add("hidden"); };
+  }
+
+  modal.querySelector("#candy-modal-title").textContent = `糖果测试诊断 · ${item.email || item.id}`;
+  modal.querySelector("#candy-modal-sub").textContent = `账号 ID: ${item.id} · 测试时间: ${item.probed_at ? fmtTime(item.probed_at) : '—'}`;
+
+  const badge = modal.querySelector("#candy-modal-badge");
+  const conc = modal.querySelector("#candy-modal-conclusion");
+  if (item.verdict === "candy_pass") {
+    badge.className = "g2a-tag ok";
+    badge.textContent = "🍬 正常通过 (正解=21)";
+    conc.style.background = "rgba(82, 196, 26, 0.1)";
+    conc.style.color = "var(--g2a-color-success, #52c41a)";
+    conc.innerHTML = `<strong>诊断结论：正常</strong>。模型成功解析抽屉极值问题并正确计算出 21，具备完整思维链推导能力。`;
+  } else if (item.verdict === "candy_pass_low_reasoning") {
+    badge.className = "g2a-tag warn";
+    badge.textContent = "⚠️ 弱思维可疑 (答出21但弱思考)";
+    conc.style.background = "rgba(250, 173, 20, 0.1)";
+    conc.style.color = "var(--g2a-color-warning, #faad14)";
+    conc.innerHTML = `<strong>诊断结论：可疑</strong>。模型虽得出 21，但 reasoning_tokens (${item.reasoning_tokens}) 显著偏低，可能依赖模板记忆或未触发完整思考模型。`;
+  } else if (item.verdict === "candy_degraded_tps_spike") {
+    badge.className = "g2a-tag bad";
+    badge.style.borderColor = "#722ed1";
+    badge.style.color = "#722ed1";
+    badge.textContent = `⚡ 降智(TPS飙升: ${item.tps ? item.tps.toFixed(0) : '高'} tok/s)`;
+    conc.style.background = "rgba(114, 46, 209, 0.1)";
+    conc.style.color = "#722ed1";
+    conc.innerHTML = `<strong>诊断结论：降智且TPS异常飙升</strong>。模型不仅未答出 21，输出吞吐更高达 <strong>${item.tps ? item.tps.toFixed(1) : '异常'} tok/s</strong> 且无深度思考。这符合多出口代理场景下同一出口 IP 被打穿后，上游网关静默调换为浅层 Mini 小模型的降智特征！关联出口已隔离，系统已将该账号自动迁出至其他出口。`;
+  } else if (item.verdict === "candy_degraded") {
+    badge.className = "g2a-tag bad";
+    badge.textContent = `🧠 降智确诊 (实际答案: ${item.extracted_answer || '未得出'})`;
+    conc.style.background = "rgba(255, 77, 79, 0.1)";
+    conc.style.color = "var(--g2a-color-error, #ff4d4f)";
+    conc.innerHTML = `<strong>诊断结论：降智确诊</strong>。模型给出错误答案 ${item.extracted_answer || '未得出'}（非 21），或未在规定时间完成极值反例排除。系统已自动施加 48 小时惩罚性冷却隔离。`;
+  } else {
+    badge.className = "g2a-tag";
+    badge.textContent = "⚪ 尚未测试";
+    conc.style.background = "var(--g2a-bg-subtle, #f5f5f5)";
+    conc.style.color = "inherit";
+    conc.textContent = "该账号尚未执行糖果测智。";
+  }
+
+  const tpsPart = item.tps ? ` · 吞吐: ${item.tps.toFixed(1)} tok/s` : '';
+  const egressPart = item.egress_node_id ? ` · 绑定出口: ${item.egress_node_id}` : '';
+  modal.querySelector("#candy-modal-stats").textContent = `耗时: ${(item.latency_ms/1000).toFixed(1)}s · 思考 Token: ${item.reasoning_tokens || 0} · 输出 Token: ${item.completion_tokens || 0}${tpsPart}${egressPart}`;
+  modal.querySelector("#candy-modal-content").textContent = item.content_snippet || (item.error ? ("错误：" + item.error) : "（暂无回答片段）");
+
+  modal.classList.remove("hidden");
+}
+
+function showNovProxyAutoExtractModal() {
+  let modal = $("novproxy-auto-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "novproxy-auto-modal";
+    modal.className = "g2a-modal-mask hidden";
+    modal.innerHTML = `
+      <div class="g2a-modal-wrap" style="max-width:540px;width:90%">
+        <div class="g2a-card">
+          <div class="g2a-card-head" style="margin-bottom:14px">
+            <div>
+              <h3 style="margin:0">⚡ 自动装载 NovProxy 住宅家宽出口</h3>
+              <p class="g2a-muted" style="margin:4px 0 0;font-size:0.85rem">自动调用接口提取纯净住宅家宽 IP，并热加载至出站守护池。</p>
+            </div>
+            <button type="button" class="g2a-btn g2a-btn-default g2a-btn-sm" id="btn-close-novproxy-auto-modal">关闭</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div class="g2a-field">
+              <label for="novproxy-auto-api">NovProxy 提取 API 链接</label>
+              <input type="text" id="novproxy-auto-api" class="g2a-input" placeholder="https://white.novproxy.com/white/api..." />
+              <div class="g2a-muted" style="font-size:0.75rem;margin-top:2px">需先将服务器外网 IP 加入 NovProxy 白名单</div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="g2a-field">
+                <label for="novproxy-auto-region">目标出口地区</label>
+                <select id="novproxy-auto-region" class="g2a-input">
+                  <option value="JP">🇯🇵 日本 (JP) · 推荐对齐东京</option>
+                  <option value="US">🇺🇸 美国 (US)</option>
+                  <option value="SG">🇸🇬 新加坡 (SG)</option>
+                </select>
+              </div>
+              <div class="g2a-field">
+                <label for="novproxy-auto-num">提取节点数</label>
+                <input type="number" id="novproxy-auto-num" class="g2a-input" min="1" max="50" value="3" />
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="g2a-field">
+                <label for="novproxy-auto-minutes">节点存活时长 (分钟)</label>
+                <input type="number" id="novproxy-auto-minutes" class="g2a-input" min="10" max="1440" value="120" />
+              </div>
+              <div class="g2a-field">
+                <label for="novproxy-auto-mode">装载策略</label>
+                <select id="novproxy-auto-mode" class="g2a-input">
+                  <option value="replace">全新替换 (清空旧节点)</option>
+                  <option value="append">增量追加 (保留健康旧节点)</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px">
+              <button type="button" class="g2a-btn g2a-btn-default" id="btn-cancel-novproxy-auto">取消</button>
+              <button type="button" class="g2a-btn g2a-btn-primary" id="btn-submit-novproxy-auto">开始自动提取并装载</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector("#btn-close-novproxy-auto-modal").onclick = () => modal.classList.add("hidden");
+    modal.querySelector("#btn-cancel-novproxy-auto").onclick = () => modal.classList.add("hidden");
+    modal.onclick = (e) => { if (e.target === modal) modal.classList.add("hidden"); };
+  }
+
+  modal.querySelector("#btn-submit-novproxy-auto").onclick = async () => {
+    const btn = modal.querySelector("#btn-submit-novproxy-auto");
+    const novproxy_api = modal.querySelector("#novproxy-auto-api").value.trim();
+    const novproxy_region = modal.querySelector("#novproxy-auto-region").value.trim();
+    const novproxy_num = Number(modal.querySelector("#novproxy-auto-num").value) || 3;
+    const novproxy_minutes = Number(modal.querySelector("#novproxy-auto-minutes").value) || 120;
+    const mode = modal.querySelector("#novproxy-auto-mode").value;
+
+    btn.disabled = true;
+    btn.textContent = "正在调用接口提取与测活…";
+    try {
+      const res = await api("/egress/auto-refresh-novproxy", {
+        method: "POST",
+        body: JSON.stringify({ novproxy_api, novproxy_region, novproxy_num, novproxy_minutes, mode }),
+      });
+      toast(res.message || "NovProxy 住宅家宽节点已自动装载并完成全池绑定重平衡！", true);
+      modal.classList.add("hidden");
+      await loadCandyPage({ silent: false });
+    } catch (err) {
+      toast("自动装载失败: " + err.message, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "开始自动提取并装载";
+    }
+  };
+
+  modal.classList.remove("hidden");
+}
+
 // Auto-bind when settings page content is live
 try {
   document.addEventListener("DOMContentLoaded", () => {
     try { bindVersionSettingsUI(); } catch (_) {}
     try { initTableTopScroll(); } catch (_) {}
+    try { if (document.body && document.body.dataset.page === "candy") loadCandyPage(); } catch (_) {}
   });
 } catch (_) {}
 

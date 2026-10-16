@@ -115,6 +115,7 @@
         <a class="g2a-menu-item " href="/admin" data-page="overview"><span class="g2a-menu-ico">◫</span><span>概览</span></a>
         <a class="g2a-menu-item " href="/admin/keys" data-page="keys"><span class="g2a-menu-ico">🔑</span><span>API Keys</span></a>
         <a class="g2a-menu-item " href="/admin/accounts" data-page="accounts"><span class="g2a-menu-ico">👥</span><span>账号 / 轮询</span></a>
+        <a class="g2a-menu-item " href="/admin/candy" data-page="candy"><span class="g2a-menu-ico">🍬</span><span>糖果测智</span></a>
         <a class="g2a-menu-item " href="/admin/usage" data-page="usage"><span class="g2a-menu-ico">Σ</span><span>用量</span></a>
         <a class="g2a-menu-item " href="/admin/logs" data-page="logs"><span class="g2a-menu-ico">📜</span><span>任务日志</span></a>
         <a class="g2a-menu-item " href="/admin/models" data-page="models"><span class="g2a-menu-ico">▣</span><span>模型</span></a>
@@ -336,6 +337,16 @@
       <div class="g2a-muted" style="margin-top:4px">同时探测的账号数。大号池建议 8–16。默认 12</div>
     </div>
     <div class="g2a-field">
+      <label for="set-candy-eval-interval">糖果降智巡检间隔（秒）</label>
+      <input id="set-candy-eval-interval" type="number" class="g2a-input" min="600" max="259200" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">周期性对存量账号下发糖果题测智；默认 21600（6小时）</div>
+    </div>
+    <div class="g2a-field">
+      <label for="set-candy-eval-cooldown">降智惩罚冷却（小时）</label>
+      <input id="set-candy-eval-cooldown" type="number" class="g2a-input" min="1" max="168" step="1" />
+      <div class="g2a-muted" style="margin-top:4px">糖果题未答出 21 时施加的冷却惩罚；默认 48 小时</div>
+    </div>
+    <div class="g2a-field">
       <label for="set-affinity-ttl">会话粘性 TTL（秒）</label>
       <input id="set-affinity-ttl" type="number" class="g2a-input" min="60" max="86400" step="1" />
       <div class="g2a-muted" style="margin-top:4px">多轮对话绑定同一账号的缓存时长；默认 7200（2h）</div>
@@ -343,6 +354,7 @@
     <div class="g2a-actions" style="grid-column:1/-1;flex-wrap:wrap;gap:16px">
       <label class="g2a-check"><input type="checkbox" id="set-token-maintain" /> Token 自动续期</label>
       <label class="g2a-check"><input type="checkbox" id="set-model-health" /> 模型健康探测</label>
+      <label class="g2a-check"><input type="checkbox" id="set-candy-eval-enabled" /> 定时糖果降智巡检（Candy-Eval）</label>
       <label class="g2a-check"><input type="checkbox" id="set-model-health-auto-disable" /> 探测失败自动踢出/封禁</label>
       <label class="g2a-check"><input type="checkbox" id="set-affinity" /> 会话粘性（同对话绑同一账号）</label>
     </div>
@@ -680,6 +692,6 @@
   <script src="/static/dist/api.9ac71f7ed9.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/state.da9974e23b.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
   <script src="/static/dist/auth.fa7b1e0e4d.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
-  <script src="/static/dist/core.e71772280c.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
+  <script src="/static/dist/core.c77e14049a.js" onerror="window.__g2aScriptFailed&&__g2aScriptFailed(this)"></script>
 </body>
 </html>

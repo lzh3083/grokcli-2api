@@ -433,6 +433,85 @@ def poll_token(
     return None
 
 
+def approve_via_browser(vurl: str, sso_cookie: str, proxy: str | None = None, log=print) -> bool:
+    """Fallback to browser automation to approve device flow when Cloudflare blocks direct HTTP POST."""
+    if not vurl or not sso_cookie:
+        return False
+    if not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":99"
+
+    proxy_dict = None
+    if proxy and not ("novproxy" in proxy.lower() or "direct" in proxy.lower()):
+        clean_p = proxy.replace("socks5h://", "socks5://")
+        proxy_dict = {"server": clean_p}
+
+    # 优先使用已加固指纹的 Camoufox
+    try:
+        from camoufox.sync_api import Camoufox
+        with Camoufox(headless=True, proxy=proxy_dict) as browser:
+            ctx = browser.new_context()
+            for dom in (".x.ai", "accounts.x.ai", "auth.x.ai"):
+                ctx.add_cookies([
+                    {"name": "sso", "value": sso_cookie, "domain": dom, "path": "/"},
+                    {"name": "sso-rw", "value": sso_cookie, "domain": dom, "path": "/"},
+                ])
+            page = ctx.new_page()
+            page.goto(vurl, wait_until="networkidle", timeout=30000)
+            try:
+                page.locator("button:has-text('Continue')").click(timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_selector("button[value='allow']", timeout=15000)
+            page.wait_for_timeout(5000)
+            allow_btn = page.locator("button[value='allow']")
+            allow_btn.scroll_into_view_if_needed()
+            allow_btn.click(timeout=8000)
+            for _ in range(25):
+                page.wait_for_timeout(400)
+                if "done" in (page.url or ""):
+                    log("  ✅ 浏览器授权确认成功 (已跳转至 done)")
+                    return True
+            return False
+    except ImportError:
+        pass
+    except Exception as exc:
+        log(f"  ⚠️ Camoufox 授权异常: {exc}")
+
+    # 次选 Playwright Firefox
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True, proxy=proxy_dict)
+            ctx = browser.new_context()
+            for dom in (".x.ai", "accounts.x.ai", "auth.x.ai"):
+                ctx.add_cookies([
+                    {"name": "sso", "value": sso_cookie, "domain": dom, "path": "/"},
+                    {"name": "sso-rw", "value": sso_cookie, "domain": dom, "path": "/"},
+                ])
+            page = ctx.new_page()
+            page.goto(vurl, wait_until="networkidle", timeout=30000)
+            try:
+                page.locator("button:has-text('Continue')").click(timeout=8000)
+            except Exception:
+                pass
+            page.wait_for_selector("button[value='allow']", timeout=15000)
+            page.wait_for_timeout(5000)
+            allow_btn = page.locator("button[value='allow']")
+            allow_btn.scroll_into_view_if_needed()
+            allow_btn.click(timeout=8000)
+            for _ in range(25):
+                page.wait_for_timeout(400)
+                if "done" in (page.url or ""):
+                    browser.close()
+                    log("  ✅ Playwright 浏览器授权确认成功 (已跳转至 done)")
+                    return True
+            browser.close()
+            return False
+    except Exception as exc:
+        log(f"  ⚠️ Playwright 授权异常: {exc}")
+        return False
+
+
 def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = None) -> dict | None:
     """SSO cookie → token dict (access/refresh/expires_in).
 
@@ -552,7 +631,22 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False, proxy: str | None = No
                 allow_redirects=True,
                 **proxy_kw,
             )
-            if "done" not in (r.url or ""):
+            approved_ok = "done" in (r.url or "")
+            if not approved_ok:
+                is_cf_blocked = (
+                    getattr(r, "status_code", 0) == 403
+                    or "could not be verified" in str(getattr(r, "text", "") or "").lower()
+                    or "consent" in (r.url or "")
+                )
+                if is_cf_blocked and dc.get("verification_uri_complete"):
+                    log("  🛡️ 纯协议 approve 触发 Cloudflare/浏览器盾拦截，启用浏览器过盾授权...")
+                    approved_ok = approve_via_browser(
+                        dc["verification_uri_complete"],
+                        raw_sso,
+                        proxy=proxy,
+                        log=log,
+                    )
+            if not approved_ok:
                 last_error_note = f"approve_redirect_to_{r.url}"
                 log(f"  ❌ approve 失败: {r.url}")
                 if attempt < retries:

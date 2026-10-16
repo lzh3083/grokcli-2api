@@ -90,7 +90,7 @@ func hashAdminSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func adminSessionExceedsMaxAge(raw string, now time.Time) bool {
+func isAdminSessionValid(raw string, now time.Time) bool {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
 		return false
@@ -123,7 +123,11 @@ func adminSessionExceedsMaxAge(raw string, now time.Time) bool {
 	if ts > 1e12 {
 		ts = ts / 1000
 	}
-	return now.Sub(time.Unix(int64(ts), 0)) > adminSessionMaxAge
+	return now.Sub(time.Unix(int64(ts), 0)) <= adminSessionMaxAge
+}
+
+func adminSessionExceedsMaxAge(raw string, now time.Time) bool {
+	return !isAdminSessionValid(raw, now)
 }
 
 func (c *Client) VerifyAdminSession(token string) bool {
@@ -145,7 +149,7 @@ func (c *Client) VerifyAdminSession(token string) bool {
 			return false
 		}
 	}
-	if adminSessionExceedsMaxAge(value, time.Now()) {
+	if !isAdminSessionValid(value, time.Now()) {
 		_, _ = c.command(ctx, "DEL", hashedKey, legacyKey)
 		return false
 	}

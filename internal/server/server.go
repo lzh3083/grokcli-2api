@@ -27,6 +27,7 @@ import (
 	"github.com/hm2899/grokcli-2api/internal/auth"
 	"github.com/hm2899/grokcli-2api/internal/buildinfo"
 	"github.com/hm2899/grokcli-2api/internal/config"
+	"github.com/hm2899/grokcli-2api/internal/egress"
 	"github.com/hm2899/grokcli-2api/internal/integrations"
 	"github.com/hm2899/grokcli-2api/internal/maintainer"
 	"github.com/hm2899/grokcli-2api/internal/modelhealth"
@@ -72,6 +73,7 @@ type Options struct {
 	Maintainer  *maintainer.Service
 	ModelHealth *modelhealth.Service
 	Quota       *quota.Service
+	EgressManager *egress.Manager
 	Config      config.Config
 	// RuntimeConfig is the live process config. When non-nil, request handlers
 	// read streaming/tool policy from it so admin settings writes take effect
@@ -152,6 +154,27 @@ func (o Options) applySettingsToRuntime(settings map[string]any) {
 	// Shell projection debug logging (admin WebUI debug_shell_args).
 	if v, ok := settings["debug_shell_args"].(bool); ok {
 		toolcall.ConfigureDebugShellArgs(v)
+	}
+
+	// Hot-reload outbound proxy egress nodes
+	if o.EgressManager != nil && settings != nil {
+		if obCfg, ok := settings["outbound_proxy_config"].(map[string]any); ok {
+			proxyText, _ := obCfg["proxy"].(string)
+			pUser, _ := obCfg["proxy_username"].(string)
+			pPass, _ := obCfg["proxy_password"].(string)
+			o.EgressManager.LoadFromConfig(proxyText, pUser, pPass)
+			if o.Store != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if auths, err := o.Store.ListAccountAuths(ctx, 5000, false); err == nil && len(auths) > 0 {
+					var ids []string
+					for _, a := range auths {
+						ids = append(ids, a.ID)
+					}
+					o.EgressManager.PrebindAccounts(ids)
+				}
+				cancel()
+			}
+		}
 	}
 	// PowerShell special policy removed: Codex is auto-detected for outbound
 	// cmd/workdir projection only (cache-safe; no prompt injection).
@@ -522,8 +545,38 @@ func NewMux(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/accounts/{account_id}/probe", func(w http.ResponseWriter, r *http.Request) {
 		serveAdminProbeAccount(w, r, options)
 	})
+	mux.HandleFunc("POST /admin/api/accounts/{account_id}/candy-eval", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCandyEvalAccount(w, r, options)
+	})
 	mux.HandleFunc("POST /admin/api/accounts/probe-batch", func(w http.ResponseWriter, r *http.Request) {
 		serveAdminProbeBatch(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/accounts/candy-eval", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCandyEvalBatch(w, r, options)
+	})
+	mux.HandleFunc("GET /admin/api/candy/overview", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCandyOverview(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/candy/probe-all", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCandyProbeAll(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/candy/config", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminCandyConfig(w, r, options)
+	})
+	mux.HandleFunc("GET /admin/api/egress/nodes", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminEgressNodes(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/egress/nodes/{node_id}/quarantine", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminEgressQuarantine(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/egress/nodes/{node_id}/restore", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminEgressRestore(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/egress/rebalance", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminEgressRebalance(w, r, options)
+	})
+	mux.HandleFunc("POST /admin/api/egress/auto-refresh-novproxy", func(w http.ResponseWriter, r *http.Request) {
+		serveAdminEgressAutoRefreshNovProxy(w, r, options)
 	})
 	mux.HandleFunc("POST /admin/api/accounts/probe-all", func(w http.ResponseWriter, r *http.Request) {
 		serveAdminProbeAll(w, r, options)
@@ -7224,6 +7277,550 @@ func stringSlice(value any) []string {
 	}
 }
 
+func serveAdminCandyEvalBatch(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.ModelHealth == nil || options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "model health service unavailable"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	ids := stringSlice(body["ids"])
+	if len(ids) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ids is empty"})
+		return
+	}
+	if len(ids) > 100 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "too many ids for candy eval (max 100)"})
+		return
+	}
+	model := stringValue(body["model"])
+	if model == "" {
+		model = options.runtimeConfig().DefaultModel
+	}
+	model = modelCatalog(options).Resolve(model)
+	results := options.ModelHealth.ProbeCandyIDs(r.Context(), ids, model, true, "manual")
+	out := make([]map[string]any, 0, len(results))
+	for _, res := range results {
+		aid := stringValue(res["account_id"])
+		pool, _ := options.Store.GetAccountPoolView(r.Context(), aid)
+		out = append(out, map[string]any{
+			"ok":         res["ok"] == true,
+			"account_id": aid,
+			"model":      model,
+			"result":     res,
+			"pool":       pool,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"results": out,
+		"count":   len(out),
+	})
+}
+
+func serveAdminCandyOverview(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, false) {
+		return
+	}
+	if options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "database store unavailable"})
+		return
+	}
+	query := r.URL.Query()
+	page := intQuery(query.Get("page"), 1)
+	pageSize := intQuery(query.Get("page_size"), 50)
+	if pageSize <= 0 {
+		pageSize = 50
+	} else if pageSize > 200 {
+		pageSize = 200
+	}
+	filter := postgres.AccountListFilter{
+		Query:  strings.TrimSpace(query.Get("q")),
+		Status: strings.TrimSpace(query.Get("status")),
+	}
+
+	result, err := options.Store.ListAccountSummariesFiltered(r.Context(), page, pageSize, filter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+
+	total := result.Total
+	passed := 0
+	suspicious := 0
+	degraded := 0
+	unprobed := 0
+
+	accountItems := make([]map[string]any, 0, len(result.Accounts))
+
+	for _, acc := range result.Accounts {
+		aid := stringValue(acc["id"])
+		email := stringValue(acc["email"])
+		var pool map[string]any
+		if p, ok := acc["_pool"].(map[string]any); ok && p != nil {
+			pool = p
+		} else if p, ok := acc["pool"].(map[string]any); ok && p != nil {
+			pool = p
+		}
+		var lastProbe map[string]any
+		if pool != nil {
+			lastProbe, _ = pool["last_probe"].(map[string]any)
+		}
+
+		verdict := "unprobed"
+		var extractedAnswer any = nil
+		var reasoningTokens int64 = 0
+		var completionTokens int64 = 0
+		var latencyMs int64 = 0
+		var probedAt any = nil
+		var contentSnippet string = ""
+		var probeErr string = ""
+		probeModel := ""
+
+		inCooldown := false
+		cooldownReason := ""
+		var cooldownRemSec float64 = 0
+
+		if pool != nil {
+			inCooldown = pool["in_cooldown"] == true || pool["pool_status"] == "cooldown"
+			cooldownReason = stringValue(pool["cooldown_reason"])
+			if rem, ok := pool["cooldown_remaining_sec"].(float64); ok {
+				cooldownRemSec = rem
+			}
+		}
+
+		if lastProbe != nil {
+			probeModel = stringValue(lastProbe["model"])
+			probedAt = lastProbe["probed_at"]
+			contentSnippet = stringValue(lastProbe["content_snippet"])
+			probeErr = stringValue(lastProbe["error"])
+			if ans, ok := lastProbe["extracted_answer"]; ok {
+				extractedAnswer = ans
+			}
+			if rt, ok := lastProbe["reasoning_tokens"].(float64); ok {
+				reasoningTokens = int64(rt)
+			} else if rt, ok := lastProbe["reasoning_tokens"].(int64); ok {
+				reasoningTokens = rt
+			}
+			if ct, ok := lastProbe["completion_tokens"].(float64); ok {
+				completionTokens = int64(ct)
+			} else if ct, ok := lastProbe["completion_tokens"].(int64); ok {
+				completionTokens = ct
+			}
+			if lat, ok := lastProbe["latency_ms"].(float64); ok {
+				latencyMs = int64(lat)
+			} else if lat, ok := lastProbe["latency_ms"].(int64); ok {
+				latencyMs = lat
+			}
+
+			if v := stringValue(lastProbe["verdict"]); v != "" {
+				verdict = v
+			} else if stringValue(lastProbe["probe_type"]) == "candy_eval" {
+				if lastProbe["ok"] == true || lastProbe["available"] == true {
+					verdict = "candy_pass"
+				} else {
+					verdict = "candy_degraded"
+				}
+			}
+		}
+
+		if verdict == "unprobed" && strings.Contains(cooldownReason, "降智") {
+			verdict = "candy_degraded"
+		}
+
+		switch verdict {
+		case "candy_pass":
+			passed++
+		case "candy_pass_low_reasoning":
+			suspicious++
+		case "candy_degraded":
+			degraded++
+		default:
+			unprobed++
+		}
+
+		accountItems = append(accountItems, map[string]any{
+			"id":                     aid,
+			"email":                  email,
+			"model":                  probeModel,
+			"verdict":                verdict,
+			"extracted_answer":       extractedAnswer,
+			"reasoning_tokens":       reasoningTokens,
+			"completion_tokens":      completionTokens,
+			"latency_ms":             latencyMs,
+			"probed_at":              probedAt,
+			"content_snippet":        contentSnippet,
+			"error":                  probeErr,
+			"in_cooldown":            inCooldown,
+			"cooldown_reason":        cooldownReason,
+			"cooldown_remaining_sec": cooldownRemSec,
+		})
+	}
+
+	probedCount := passed + suspicious + degraded
+	passRate := 0.0
+	if probedCount > 0 {
+		passRate = float64(passed+suspicious) / float64(probedCount) * 100
+	}
+
+	var candyConfig map[string]any
+	if options.ModelHealth != nil {
+		st := options.ModelHealth.Status()
+		if cc, ok := st["candy_eval"].(map[string]any); ok {
+			candyConfig = cc
+		}
+	}
+
+	var egressNodes any = []any{}
+	if options.EgressManager != nil {
+		egressNodes = options.EgressManager.ListNodes()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"page":        result.Page,
+		"page_size":   result.PageSize,
+		"total_pages": result.TotalPages,
+		"stats": map[string]any{
+			"total":      total,
+			"probed":     probedCount,
+			"passed":     passed,
+			"suspicious": suspicious,
+			"degraded":   degraded,
+			"unprobed":   unprobed,
+			"pass_rate":  passRate,
+		},
+		"config":       candyConfig,
+		"egress_nodes": egressNodes,
+		"accounts":     accountItems,
+	})
+}
+
+func serveAdminEgressNodes(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, false) {
+		return
+	}
+	if options.EgressManager == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": []any{}, "count": 0})
+		return
+	}
+	nodes := options.EgressManager.ListNodes()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "nodes": nodes, "count": len(nodes)})
+}
+
+func serveAdminEgressQuarantine(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.EgressManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "egress manager unavailable"})
+		return
+	}
+	nodeID := strings.TrimSpace(r.PathValue("node_id"))
+	if nodeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id required"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	reason := stringValue(body["reason"])
+	if reason == "" {
+		reason = "管理员手动隔离出口节点"
+	}
+	durationHours := 1.0
+	if h, ok := body["duration_hours"].(float64); ok && h > 0 {
+		durationHours = h
+	}
+	dur := time.Duration(durationHours * float64(time.Hour))
+	if err := options.EgressManager.QuarantineNode(nodeID, reason, dur); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": fmt.Sprintf("节点 %s 已隔离 %.1f 小时，关联账号已自动迁出到健康出口", nodeID, durationHours),
+		"nodes":   options.EgressManager.ListNodes(),
+	})
+}
+
+func serveAdminEgressRestore(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.EgressManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "egress manager unavailable"})
+		return
+	}
+	nodeID := strings.TrimSpace(r.PathValue("node_id"))
+	if nodeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "node_id required"})
+		return
+	}
+	if err := options.EgressManager.RestoreNode(nodeID); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": fmt.Sprintf("节点 %s 已恢复健康", nodeID),
+		"nodes":   options.EgressManager.ListNodes(),
+	})
+}
+
+func serveAdminEgressRebalance(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.EgressManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "egress manager unavailable"})
+		return
+	}
+	if options.Store != nil {
+		if auths, err := options.Store.ListAccountAuths(r.Context(), 5000, false); err == nil && len(auths) > 0 {
+			var ids []string
+			for _, a := range auths {
+				ids = append(ids, a.ID)
+			}
+			options.EgressManager.PrebindAccounts(ids)
+		} else {
+			options.EgressManager.Rebalance()
+		}
+	} else {
+		options.EgressManager.Rebalance()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "已完成全池账号与健康出口节点的粘性映射重平衡",
+		"nodes":   options.EgressManager.ListNodes(),
+	})
+}
+
+func serveAdminEgressAutoRefreshNovProxy(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	client := registrationClient(options)
+	if client == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "registration client unavailable"})
+		return
+	}
+	if options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "database store unavailable"})
+		return
+	}
+
+	var reqBody map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&reqBody)
+	if reqBody == nil {
+		reqBody = map[string]any{}
+	}
+
+	settings, _ := options.Store.PublicSettings(r.Context())
+	apiURL := stringValue(reqBody["novproxy_api"])
+	if apiURL == "" && settings != nil {
+		apiURL = stringValue(settings["reg_novproxy_api"])
+		if apiURL == "" {
+			apiURL = stringValue(settings["novproxy_api"])
+		}
+	}
+	if apiURL == "" {
+		apiURL = "https://white.novproxy.com/white/api"
+	}
+
+	region := stringValue(reqBody["novproxy_region"])
+	if region == "" && settings != nil {
+		region = stringValue(settings["reg_novproxy_region"])
+		if region == "" {
+			region = stringValue(settings["novproxy_region"])
+		}
+	}
+	if region == "" {
+		region = "JP"
+	}
+
+	num := 3
+	if n, ok := reqBody["novproxy_num"].(float64); ok && n > 0 {
+		num = int(n)
+	} else if n, ok := reqBody["num"].(float64); ok && n > 0 {
+		num = int(n)
+	}
+	if num > 50 {
+		num = 50
+	}
+
+	minutes := 120
+	if m, ok := reqBody["novproxy_minutes"].(float64); ok && m > 0 {
+		minutes = int(m)
+	} else if m, ok := reqBody["minutes"].(float64); ok && m > 0 {
+		minutes = int(m)
+	}
+
+	extractPayload := map[string]any{
+		"novproxy_api":     apiURL,
+		"novproxy_region":  region,
+		"novproxy_num":     num,
+		"novproxy_minutes": minutes,
+		"expect_country":   region,
+	}
+
+	extractRes, err := client.NovProxyExtract(r.Context(), extractPayload)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "提取 NovProxy 住宅节点失败: " + err.Error()})
+		return
+	}
+
+	var newLines []string
+	if rawLines, ok := extractRes["lines"].([]any); ok {
+		for _, l := range rawLines {
+			if str := strings.TrimSpace(fmt.Sprint(l)); str != "" {
+				newLines = append(newLines, str)
+			}
+		}
+	} else if rawStr, ok := extractRes["lines"].([]string); ok {
+		newLines = rawStr
+	}
+
+	if len(newLines) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "NovProxy 接口未返回有效代理节点"})
+		return
+	}
+
+	mode := stringValue(reqBody["mode"])
+	if mode == "" {
+		mode = "replace"
+	}
+
+	var combinedLines []string
+	if mode == "append" {
+		if options.EgressManager != nil {
+			for _, n := range options.EgressManager.ListNodes() {
+				if n.IsHealthy() && n.ProxyURL != "" {
+					combinedLines = append(combinedLines, n.ProxyURL)
+				}
+			}
+		}
+	}
+	combinedLines = append(combinedLines, newLines...)
+
+	seen := make(map[string]bool)
+	var finalLines []string
+	for _, l := range combinedLines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			finalLines = append(finalLines, trimmed)
+		}
+	}
+
+	newProxyText := strings.Join(finalLines, "\n")
+	patch := map[string]any{
+		"outbound_proxy":         newProxyText,
+		"outbound_proxy_enabled": true,
+	}
+
+	updatedSettings, err := options.Store.UpdateRuntimeSettings(r.Context(), patch)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": "更新出站配置失败: " + err.Error()})
+		return
+	}
+
+	options.applySettingsToRuntime(updatedSettings)
+
+	if options.EgressManager != nil {
+		options.EgressManager.LoadFromConfig(newProxyText, "", "")
+		if options.Store != nil {
+			if auths, err := options.Store.ListAccountAuths(r.Context(), 5000, false); err == nil && len(auths) > 0 {
+				var ids []string
+				for _, a := range auths {
+					ids = append(ids, a.ID)
+				}
+				options.EgressManager.PrebindAccounts(ids)
+			} else {
+				options.EgressManager.Rebalance()
+			}
+		} else {
+			options.EgressManager.Rebalance()
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"message":     fmt.Sprintf("已成功自动提取并装载 %d 个 NovProxy 住宅家宽出口，全池账号已自动重新粘性分配！", len(newLines)),
+		"extracted":   len(newLines),
+		"total_nodes": len(finalLines),
+		"nodes":       options.EgressManager.ListNodes(),
+	})
+}
+
+func serveAdminCandyProbeAll(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.ModelHealth == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "model health unavailable"})
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Minute)
+		defer cancel()
+		options.ModelHealth.RunCandyWave(ctx, "manual_all")
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "全池糖果测智巡检任务已在后台启动",
+	})
+}
+
+func serveAdminCandyConfig(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.Store == nil || options.ModelHealth == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "service unavailable"})
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "invalid json body"})
+		return
+	}
+
+	patch := map[string]any{}
+	var enabledPtr *bool
+	if v, ok := body["enabled"].(bool); ok {
+		patch["candy_eval_enabled"] = v
+		enabledPtr = &v
+	}
+	var intervalSec float64
+	if v, ok := body["interval_sec"].(float64); ok {
+		patch["candy_eval_interval_sec"] = v
+		intervalSec = v
+	}
+	var cooldownHours int
+	if v, ok := body["cooldown_hours"].(float64); ok {
+		patch["candy_eval_cooldown_hours"] = int(v)
+		cooldownHours = int(v)
+	}
+
+	if _, err := options.Store.UpdateRuntimeSettings(r.Context(), patch); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
+		return
+	}
+
+	if enabledPtr != nil || intervalSec > 0 || cooldownHours > 0 {
+		options.ModelHealth.ConfigureCandy(enabledPtr, intervalSec, cooldownHours)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "糖果测智配置已更新",
+	})
+}
+
 func serveAdminProbeBatch(w http.ResponseWriter, r *http.Request, options Options) {
 	if !requireAdminReadWrite(w, r, options, true) {
 		return
@@ -7234,6 +7831,29 @@ func serveAdminProbeBatch(w http.ResponseWriter, r *http.Request, options Option
 	}
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if stringValue(body["type"]) == "candy" || stringValue(body["mode"]) == "candy" || r.URL.Query().Get("type") == "candy" {
+		ids := stringSlice(body["ids"])
+		model := stringValue(body["model"])
+		if model == "" {
+			model = options.runtimeConfig().DefaultModel
+		}
+		model = modelCatalog(options).Resolve(model)
+		results := options.ModelHealth.ProbeCandyIDs(r.Context(), ids, model, true, "manual")
+		out := make([]map[string]any, 0, len(results))
+		for _, res := range results {
+			aid := stringValue(res["account_id"])
+			pool, _ := options.Store.GetAccountPoolView(r.Context(), aid)
+			out = append(out, map[string]any{
+				"ok":         res["ok"] == true,
+				"account_id": aid,
+				"model":      model,
+				"result":     res,
+				"pool":       pool,
+			})
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	ids := stringSlice(body["ids"])
 	if len(ids) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "ids is empty"})
@@ -9383,12 +10003,12 @@ func serviceStatus(svc statusProvider, options Options) map[string]any {
 	return svc.Status()
 }
 
-func serveAdminProbeAccount(w http.ResponseWriter, r *http.Request, options Options) {
+func serveAdminCandyEvalAccount(w http.ResponseWriter, r *http.Request, options Options) {
 	if !requireAdminReadWrite(w, r, options, true) {
 		return
 	}
-	if options.Store == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "PostgreSQL store unavailable"})
+	if options.Store == nil || options.ModelHealth == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "model health service unavailable"})
 		return
 	}
 	var body map[string]any
@@ -9401,6 +10021,59 @@ func serveAdminProbeAccount(w http.ResponseWriter, r *http.Request, options Opti
 	accountID := strings.TrimSpace(r.PathValue("account_id"))
 	if accountID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "account_id required"})
+		return
+	}
+	auth, err := options.Store.GetAccountAuth(r.Context(), accountID)
+	if err != nil || auth == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"detail": "account not found"})
+		return
+	}
+	result := options.ModelHealth.ProbeCandyAccount(r.Context(), *auth, model, "manual", true, false)
+	poolView, _ := options.Store.GetAccountPoolView(r.Context(), accountID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         result["ok"] == true,
+		"account_id": accountID,
+		"model":      model,
+		"result":     result,
+		"pool":       poolView,
+	})
+}
+
+func serveAdminProbeAccount(w http.ResponseWriter, r *http.Request, options Options) {
+	if !requireAdminReadWrite(w, r, options, true) {
+		return
+	}
+	if options.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"detail": "PostgreSQL store unavailable"})
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	accountID := strings.TrimSpace(r.PathValue("account_id"))
+	if accountID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "account_id required"})
+		return
+	}
+	model := stringValue(body["model"])
+	if model == "" {
+		model = options.runtimeConfig().DefaultModel
+	}
+	model = modelCatalog(options).Resolve(model)
+	if stringValue(body["type"]) == "candy" || stringValue(body["mode"]) == "candy" || r.URL.Query().Get("type") == "candy" {
+		auth, err := options.Store.GetAccountAuth(r.Context(), accountID)
+		if err != nil || auth == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"detail": "account not found"})
+			return
+		}
+		result := options.ModelHealth.ProbeCandyAccount(r.Context(), *auth, model, "manual", true, false)
+		poolView, _ := options.Store.GetAccountPoolView(r.Context(), accountID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         result["ok"] == true,
+			"account_id": accountID,
+			"model":      model,
+			"result":     result,
+			"pool":       poolView,
+		})
 		return
 	}
 	// Manual "模型测试" is full 测活: last_probe + kick/block/clear must land in DB
@@ -10088,7 +10761,7 @@ func serveAdminPage(w http.ResponseWriter, r *http.Request, staticDir, page stri
 func allowedAdminPage(name string) bool {
 	switch name {
 	// Keep in sync with static/js PAGE_HREF / PAGE_META and static/admin/*.html.
-	case "index", "login", "keys", "accounts", "models", "guide", "settings", "logs", "usage":
+	case "index", "login", "keys", "accounts", "candy", "models", "guide", "settings", "logs", "usage":
 		return true
 	default:
 		return false

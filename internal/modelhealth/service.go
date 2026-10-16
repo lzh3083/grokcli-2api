@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hm2899/grokcli-2api/internal/egress"
 	"github.com/hm2899/grokcli-2api/internal/pool"
 	"github.com/hm2899/grokcli-2api/internal/store/postgres"
 	"github.com/hm2899/grokcli-2api/internal/store/redis"
@@ -75,6 +76,15 @@ type Service struct {
 	localSweepGen     int64
 	localSweepStart   float64
 	localSweepCovered map[string]struct{}
+
+	// Candy-Eval 防降智巡检配置与状态
+	CandyEvalEnabled       bool
+	CandyEvalInterval      time.Duration
+	CandyEvalCooldownHours int
+	candyMu                sync.Mutex
+	lastCandySweep         map[string]any
+
+	Egress *egress.Manager
 }
 
 func New(store *postgres.Connector, redisClient *redis.Client, upstream string, models []string) *Service {
@@ -107,6 +117,10 @@ func New(store *postgres.Connector, redisClient *redis.Client, upstream string, 
 		httpClient:          newProbeHTTPClient(),
 		job:                 map[string]any{"running": false},
 		localSweepCovered:   map[string]struct{}{},
+		CandyEvalEnabled:    envBool("GROK2API_CANDY_EVAL_ENABLED", true),
+		CandyEvalInterval:   envDurationSec("GROK2API_CANDY_EVAL_INTERVAL_SEC", 6*time.Hour, 10*time.Minute, 48*time.Hour),
+		CandyEvalCooldownHours: envInt("GROK2API_CANDY_COOLDOWN_HOURS", 48, 1, 168),
+		lastCandySweep:      map[string]any{"ok": true, "started": false},
 	}
 }
 
@@ -147,6 +161,36 @@ func (s *Service) Knobs() (interval time.Duration, batch, workers int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Interval, s.Batch, s.Workers
+}
+
+// ConfigureCandy hot-applies Candy-Eval knobs from durable settings without restart.
+func (s *Service) ConfigureCandy(enabled *bool, intervalSec float64, cooldownHours int) {
+	if s == nil {
+		return
+	}
+	s.candyMu.Lock()
+	defer s.candyMu.Unlock()
+	if enabled != nil {
+		s.CandyEvalEnabled = *enabled
+	}
+	if intervalSec >= 600 {
+		d := time.Duration(intervalSec * float64(time.Second))
+		if d > 72*time.Hour {
+			d = 72 * time.Hour
+		}
+		s.CandyEvalInterval = d
+	}
+	if cooldownHours >= 1 && cooldownHours <= 168 {
+		s.CandyEvalCooldownHours = cooldownHours
+	}
+}
+
+// SetEgress sets the egress manager for proxy node routing & quarantine.
+func (s *Service) SetEgress(egressMgr *egress.Manager) {
+	if s == nil {
+		return
+	}
+	s.Egress = egressMgr
 }
 
 // SetModels hot-updates the probed models list.
@@ -296,6 +340,18 @@ func (s *Service) Status() map[string]any {
 		"last":            lastCopy,
 		"selection":       "strict_sweep",
 	}
+	s.candyMu.Lock()
+	candyEnabled := s.CandyEvalEnabled
+	candyIntervalSec := s.CandyEvalInterval.Seconds()
+	candyCooldownHours := s.CandyEvalCooldownHours
+	lastCandyCopy := cloneMap(s.lastCandySweep)
+	s.candyMu.Unlock()
+	out["candy_eval"] = map[string]any{
+		"enabled":        candyEnabled,
+		"interval_sec":   candyIntervalSec,
+		"cooldown_hours": candyCooldownHours,
+		"last":           lastCandyCopy,
+	}
 	s.jobMu.Lock()
 	jobCopy := map[string]any{}
 	for k, v := range s.job {
@@ -347,9 +403,26 @@ func (s *Service) currentInterval() time.Duration {
 	return s.Interval
 }
 
+func (s *Service) currentCandyInterval() time.Duration {
+	s.candyMu.Lock()
+	defer s.candyMu.Unlock()
+	if s.CandyEvalInterval <= 0 {
+		return 6 * time.Hour
+	}
+	return s.CandyEvalInterval
+}
+
+func (s *Service) isCandyEvalEnabled() bool {
+	s.candyMu.Lock()
+	defer s.candyMu.Unlock()
+	return s.CandyEvalEnabled
+}
+
 func (s *Service) loop(stopCh <-chan struct{}) {
 	timer := time.NewTimer(8 * time.Second)
 	defer timer.Stop()
+	candyTimer := time.NewTimer(45 * time.Second)
+	defer candyTimer.Stop()
 	for {
 		select {
 		case <-stopCh:
@@ -357,6 +430,11 @@ func (s *Service) loop(stopCh <-chan struct{}) {
 		case <-timer.C:
 			s.maybeRun()
 			timer.Reset(s.currentInterval())
+		case <-candyTimer.C:
+			if s.isCandyEvalEnabled() {
+				s.maybeRunCandy()
+			}
+			candyTimer.Reset(s.currentCandyInterval())
 		case <-s.runSoon:
 			s.maybeRun()
 			if !timer.Stop() {
@@ -368,6 +446,117 @@ func (s *Service) loop(stopCh <-chan struct{}) {
 			timer.Reset(s.currentInterval())
 		}
 	}
+}
+
+func (s *Service) maybeRunCandy() {
+	if s.Enabled != nil && !s.Enabled() {
+		return
+	}
+	if s.IsLeader != nil && !s.IsLeader() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	res := s.RunCandyWave(ctx, "candy_cron")
+	s.candyMu.Lock()
+	s.lastCandySweep = res
+	s.candyMu.Unlock()
+	s.writeTaskLog(ctx, "candy_cron", res)
+}
+
+func (s *Service) RunCandyWave(ctx context.Context, source string) map[string]any {
+	started := time.Now()
+	slog.Info("candy wave started", "source", source)
+	result := map[string]any{
+		"ok": true, "source": source, "probe_type": "candy_eval",
+		"at": started.Unix(), "probed": 0, "available": 0, "failed": 0,
+		"running": true,
+	}
+	s.candyMu.Lock()
+	s.lastCandySweep = cloneMap(result)
+	s.candyMu.Unlock()
+
+	if s.Store == nil {
+		slog.Warn("candy wave store is nil")
+		result["ok"] = false
+		result["running"] = false
+		result["error"] = "store unavailable"
+		return result
+	}
+
+	model := "grok-4.5"
+	if len(s.Models) > 0 {
+		model = s.Models[0]
+	}
+
+	batchSize := 10
+	if source == "manual_all" {
+		batchSize = 16
+	}
+
+	totalProbed := 0
+	totalAvail := 0
+	totalFailed := 0
+	covered := make(map[string]struct{})
+
+	for {
+		if ctx.Err() != nil {
+			slog.Warn("candy wave context canceled", "error", ctx.Err())
+			break
+		}
+		excludeList := make([]string, 0, len(covered))
+		for id := range covered {
+			excludeList = append(excludeList, id)
+		}
+		auths, err := s.Store.ListAccountAuthsForProbe(ctx, batchSize, excludeList...)
+		if err != nil {
+			slog.Warn("candy wave ListAccountAuthsForProbe failed", "error", err)
+			break
+		}
+		if len(auths) == 0 {
+			slog.Info("candy wave reached end of accounts", "totalProbed", totalProbed)
+			break
+		}
+
+		var ids []string
+		for _, a := range auths {
+			ids = append(ids, a.ID)
+			covered[a.ID] = struct{}{}
+		}
+
+		slog.Info("candy wave probing batch", "count", len(ids), "totalSoFar", totalProbed)
+		probes := s.ProbeCandyIDs(ctx, ids, model, true, source)
+		for _, p := range probes {
+			totalProbed++
+			if p["ok"] == true {
+				totalAvail++
+			} else {
+				totalFailed++
+			}
+		}
+
+		result["count"] = totalProbed
+		result["probed"] = totalProbed
+		result["available"] = totalAvail
+		result["available_count"] = totalAvail
+		result["failed"] = totalFailed
+		result["unavailable_count"] = totalFailed
+
+		s.candyMu.Lock()
+		s.lastCandySweep = cloneMap(result)
+		s.candyMu.Unlock()
+
+		if source != "manual_all" {
+			break
+		}
+	}
+
+	result["running"] = false
+	result["elapsed_sec"] = time.Since(started).Seconds()
+	s.candyMu.Lock()
+	s.lastCandySweep = cloneMap(result)
+	s.candyMu.Unlock()
+	return result
 }
 
 func (s *Service) maybeRun() {
@@ -1884,4 +2073,12 @@ func envInt(name string, fallback, min, max int) int {
 		return max
 	}
 	return n
+}
+
+func envBool(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	return raw != "0" && !strings.EqualFold(raw, "false") && !strings.EqualFold(raw, "no")
 }

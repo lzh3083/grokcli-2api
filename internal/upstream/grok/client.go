@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +25,9 @@ type Client struct {
 }
 
 type Account struct {
-	ID    string
-	Token string
+	ID       string
+	Token    string
+	ProxyURL string
 }
 
 type Event struct {
@@ -79,9 +81,19 @@ func defaultHTTPClient() *http.Client {
 	}
 }
 
+const maxProxyClients = 64
+
+type proxyClientEntry struct {
+	client   *http.Client
+	lastUsed time.Time
+}
+
 var (
 	sharedHTTPOnce   sync.Once
 	sharedHTTPClient *http.Client
+
+	proxyClientsMu sync.RWMutex
+	proxyClients   = make(map[string]*proxyClientEntry)
 )
 
 func getSharedHTTPClient() *http.Client {
@@ -91,9 +103,74 @@ func getSharedHTTPClient() *http.Client {
 	return sharedHTTPClient
 }
 
+func getHTTPClientForProxy(proxyURL string) *http.Client {
+	if strings.TrimSpace(proxyURL) == "" {
+		return getSharedHTTPClient()
+	}
+	proxyClientsMu.Lock()
+	defer proxyClientsMu.Unlock()
+
+	now := time.Now()
+	if entry, ok := proxyClients[proxyURL]; ok {
+		entry.lastUsed = now
+		return entry.client
+	}
+
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return getSharedHTTPClient()
+	}
+
+	// 达到容量上限时，淘汰最久未使用的代理 Client 并关闭底层闲置连接释放资源
+	if len(proxyClients) >= maxProxyClients {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range proxyClients {
+			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.lastUsed
+			}
+		}
+		if oldestKey != "" {
+			if old := proxyClients[oldestKey]; old != nil && old.client != nil {
+				if tr, ok := old.client.Transport.(*http.Transport); ok && tr != nil {
+					tr.CloseIdleConnections()
+				}
+			}
+			delete(proxyClients, oldestKey)
+		}
+	}
+
+	tr := &http.Transport{
+		Proxy:                 http.ProxyURL(u),
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   32,
+		MaxConnsPerHost:       64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ForceAttemptHTTP2:     true,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+	newC := &http.Client{
+		Timeout:   0,
+		Transport: tr,
+	}
+	proxyClients[proxyURL] = &proxyClientEntry{
+		client:   newC,
+		lastUsed: now,
+	}
+	return newC
+}
+
 func (c *Client) Open(ctx context.Context, account Account, model string, body map[string]any) (*http.Response, error) {
 	httpClient := c.HTTP
-	if httpClient == nil {
+	if strings.TrimSpace(account.ProxyURL) != "" {
+		httpClient = getHTTPClientForProxy(account.ProxyURL)
+	} else if httpClient == nil {
 		httpClient = getSharedHTTPClient()
 	}
 	// CPA / cli-chat-proxy cache path: always call /responses (not /chat/completions).

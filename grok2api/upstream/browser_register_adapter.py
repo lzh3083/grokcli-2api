@@ -427,7 +427,41 @@ def run_browser_registration(
             raise RuntimeError("未能从浏览器会话中提取到 sso cookie")
         _log_cb(f"[+] 成功获取 SSO Cookie (长度={len(sso)})")
 
-        # 流量节省关键优化：SSO已获取，立即关闭浏览器并断开代理连接，避免后台长连接偷跑流量
+        # 核心增强：在已有注册浏览器会话中直接执行 OIDC Device Flow 授权，彻底绕过 Cloudflare 盾
+        pre_device_code = None
+        try:
+            import scripts.sso_to_auth_json as _sso_mod
+            _dc = _sso_mod.request_device_code()
+            if _dc and _dc.get("verification_uri_complete"):
+                _vurl = _dc["verification_uri_complete"]
+                _uc = _dc.get("user_code")
+                _log_cb(f"[*] 正在当前注册浏览器中执行 OIDC 设备授权 (user_code={_uc})...")
+                _cur_page = registration_browser.refresh_active_page()
+                if _cur_page is not None:
+                    _pw_page = getattr(_cur_page, "native", _cur_page)
+                    _pw_page.goto(_vurl, wait_until="networkidle", timeout=30000)
+                    try:
+                        _cont = _pw_page.locator("button:has-text('Continue')")
+                        _cont.click(timeout=8000)
+                    except Exception:
+                        pass
+                    _pw_page.wait_for_selector("button[value='allow']", timeout=15000)
+                    # 等待 Cloudflare challenge 结算注入 cf_clearance
+                    import time as _t
+                    _t.sleep(4.0)
+                    _allow = _pw_page.locator("button[value='allow']")
+                    _allow.scroll_into_view_if_needed()
+                    _allow.click(timeout=8000)
+                    for _ in range(25):
+                        _t.sleep(0.4)
+                        if "done" in (_pw_page.url or ""):
+                            _log_cb("[+] 当前浏览器 OIDC 设备授权确认成功 (已跳转至 done)")
+                            pre_device_code = _dc.get("device_code")
+                            break
+        except Exception as _dev_flow_err:
+            _log_cb(f"[!] 浏览器即时 OIDC 设备授权跳过 (将走降级通道): {_dev_flow_err}")
+
+        # 流量节省优化：SSO与设备授权已完成，关闭浏览器释放资源
         try:
             registration_browser.stop_browser()
             registration_browser.cleanup_runtime_memory(log_callback=_log_cb, reason="SSO已获取提前释放浏览器")
@@ -504,7 +538,7 @@ def run_browser_registration(
             print(f"[{sid}] cleanup error: {clean_exc}")
 
     password = str(profile.get("password") or sess.get("password") or "")
-    return {
+    ret = {
         "ok": True,
         "sso": sso,
         "email": email,
@@ -515,3 +549,6 @@ def run_browser_registration(
             "sso-rw": sso,
         },
     }
+    if pre_device_code:
+        ret["device_code"] = pre_device_code
+    return ret

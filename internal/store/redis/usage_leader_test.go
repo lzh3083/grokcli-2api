@@ -62,6 +62,13 @@ func TestHashAdminSessionTokenAndMaxAge(t *testing.T) {
 	if !adminSessionExceedsMaxAge(`{"ts":1700000000}`, time.Unix(1700000000+31*86400, 0)) {
 		t.Fatal("31d old session should exceed max age")
 	}
+	// 验证格式异常/非JSON伪造数据必须 fail-closed
+	if !adminSessionExceedsMaxAge(`invalid-json`, time.Now()) {
+		t.Fatal("malformed json session must be rejected as invalid/expired")
+	}
+	if !adminSessionExceedsMaxAge(`{}`, time.Now()) {
+		t.Fatal("session without ts must be rejected as invalid/expired")
+	}
 }
 
 func TestLeaderConcurrentReleaseNoPanic(t *testing.T) {
