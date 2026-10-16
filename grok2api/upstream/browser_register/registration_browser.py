@@ -1159,6 +1159,19 @@ return 'enter';
             if log_callback:
                 detail = f" ({clicked})" if isinstance(clicked, str) else ""
                 log_callback(f"[*] 已填写邮箱并提交: {email}{detail}")
+            try:
+                cur_p = _get_page()
+                if cur_p is not None:
+                    pw = getattr(cur_p, "native", cur_p)
+                    for _w in range(12):
+                        has_otp = pw.locator("input[name='code'], input[data-input-otp='true'], input[autocomplete='one-time-code']").count()
+                        if has_otp > 0:
+                            if log_callback:
+                                log_callback("[+] 页面已确认进入验证码阶段")
+                            break
+                        time.sleep(0.5)
+            except Exception:
+                pass
             return email, dev_token
         sleep_with_cancel(0.5, cancel_callback)
     if last_snapshot:
@@ -1173,19 +1186,20 @@ return 'enter';
 
 def fill_code_and_submit(email, dev_token, timeout=180, transition_timeout=15, log_callback=None, cancel_callback=None):
     def _resend_code():
-        cur_page = _get_page()
-        if cur_page is not None:
-            cur_page.run_js(
-                r"""
-const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-const target = nodes.find((node) => {
-  const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
-  return t.includes('重新发送') || t.includes('resend') || t.includes('再次发送');
-});
-if (target && !target.disabled) { target.click(); return true; }
-return false;
-                """
-            )
+        try:
+            cur_page = _get_page()
+            if cur_page is not None:
+                pw = getattr(cur_page, "native", cur_page)
+                btn = pw.locator("button:has-text('Resend'), button:has-text('重新发送'), a:has-text('Resend')")
+                if btn.count() > 0 and btn.first.is_visible():
+                    btn.first.click(timeout=3000)
+                    if log_callback:
+                        log_callback("[*] 页面成功点击【重新发送验证码】")
+                    return True
+        except Exception as re_err:
+            if log_callback:
+                log_callback(f"[Debug] 页面重发尝试跳过: {re_err}")
+        return False
 
     _mark_registration_stage("code_wait")
     code = get_oai_code(

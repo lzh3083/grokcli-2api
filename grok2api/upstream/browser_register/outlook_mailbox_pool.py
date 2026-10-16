@@ -260,6 +260,25 @@ class OutlookAccountPool:
 
     def acquire(self, log_callback=None) -> OutlookMailbox:
         last_error = None
+        existing = set()
+        try:
+            from grok2api.store.accounts_pg import connection
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT lower(email) FROM accounts")
+                    existing = {r[0] for r in cur.fetchall()}
+        except Exception:
+            pass
+
+        consumed_file = "/app/data/consumed_hotmail.txt"
+        consumed = set()
+        if os.path.exists(consumed_file):
+            try:
+                with open(consumed_file, "r", encoding="utf-8") as cf:
+                    consumed = {l.strip().lower() for l in cf if l.strip()}
+            except Exception:
+                pass
+
         while True:
             with self._lock:
                 if self._next >= len(self._accounts):
@@ -271,6 +290,22 @@ class OutlookAccountPool:
                     raise RuntimeError("Outlook 邮箱池已耗尽，不会循环复用已领取账号")
                 account = self._accounts[self._next]
                 self._next += 1
+            em_low = account.email.lower()
+            if em_low in existing:
+                if log_callback:
+                    log_callback("[*] 跳过已在数据库中的账号: %s" % account.email)
+                continue
+            if em_low in consumed:
+                if log_callback:
+                    log_callback("[*] 跳过已尝试过的账号: %s" % account.email)
+                continue
+
+            try:
+                with open(consumed_file, "a", encoding="utf-8") as cf:
+                    cf.write(em_low + chr(10))
+            except Exception:
+                pass
+
             mailbox = OutlookMailbox(account, log_callback=log_callback)
             try:
                 mailbox.prepare()
