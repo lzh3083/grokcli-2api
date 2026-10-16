@@ -216,7 +216,7 @@ func main() {
 				healthSvc.Configure(intervalSec, batch, workers)
 				candyEnabled, candyOk := settings["candy_eval_enabled"].(bool)
 				if !candyOk {
-					candyEnabled = true
+					candyEnabled = false
 				}
 				var candyIntervalSec float64
 				switch v := settings["candy_eval_interval_sec"].(type) {

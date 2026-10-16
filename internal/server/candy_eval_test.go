@@ -65,11 +65,18 @@ func TestCandyEvalResultClassification(t *testing.T) {
 
 func TestCandyEvalSchedulerSettings(t *testing.T) {
 	svc := modelhealth.New(nil, nil, "http://127.0.0.1:9999", []string{"grok-4.5"})
-	if !svc.CandyEvalEnabled {
-		t.Fatalf("expected CandyEvalEnabled default to true")
+	if svc.CandyEvalEnabled {
+		t.Fatalf("expected CandyEvalEnabled default to false")
 	}
 
-	// 测试热更新
+	// 测试开启
+	tr := true
+	svc.ConfigureCandy(&tr, 3600, 24)
+	if !svc.CandyEvalEnabled {
+		t.Fatalf("expected CandyEvalEnabled to be true after configure")
+	}
+
+	// 测试热更新关闭
 	f := false
 	svc.ConfigureCandy(&f, 3600, 24)
 	if svc.CandyEvalEnabled {

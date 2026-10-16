@@ -71,7 +71,7 @@ func (c *Connector) PublicSettings(ctx context.Context) (map[string]any, error) 
 		"model_health_auto_disable":     boolSetting(values, "model_health_auto_disable", true),
 		"model_health_probe_batch":      floatSetting(values, "model_health_probe_batch", 120),
 		"model_health_probe_workers":    floatSetting(values, "model_health_probe_workers", 12),
-		"candy_eval_enabled":            boolSetting(values, "candy_eval_enabled", true),
+		"candy_eval_enabled":            boolSetting(values, "candy_eval_enabled", false),
 		"candy_eval_interval_sec":       floatSetting(values, "candy_eval_interval_sec", 21600),
 		"candy_eval_cooldown_hours":     intSetting(values, "candy_eval_cooldown_hours", 48),
 		"probe_models":                  valueOr(values, "probe_models", []string{"grok-4.5", "grok-4.6", "grok-4.7"}),
